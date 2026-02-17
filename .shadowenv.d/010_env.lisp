@@ -1,0 +1,10 @@
+(env/set "RUST_LOG" "info")
+(env/set "RUSTC_WRAPPER" "sccache")
+(env/set "S2_ACCOUNT_ENDPOINT" "http://127.0.0.1:8883")
+(env/set "S2_BASIN_ENDPOINT" "http://127.0.0.1:8883")
+(env/set "S2_ACCESS_TOKEN" "NO_NEED")
+(env/set "ZO_TCP_PORT" "8884")
+(env/set "ZO_UDP_PORT" "8884")
+(env/set "ZO_GRPC_PORT" "8885")
+(env/set "ZO_HTTP_PORT" "8886")
+

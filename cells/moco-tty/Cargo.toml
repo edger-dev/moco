@@ -1,0 +1,17 @@
+[package]
+name = "moco-tty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+moco-core = { workspace = true }
+
+libc = "0.2"
+nix = { version = "0.31", features = ["term", "process", "signal", "fs"] }
+rootcause = { workspace = true }
+log = { workspace = true }

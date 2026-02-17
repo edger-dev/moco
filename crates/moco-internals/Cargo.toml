@@ -1,0 +1,15 @@
+[package]
+name = "moco-internals"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+facet = "0.43.2"
+facet-styx = "1.0.1"
+roam = { git = "https://github.com/bearcove/roam", version = "3.0.0" }
+semver = "1.0.27"

@@ -1,0 +1,862 @@
+{
+  "lockfile-version": 1,
+  "manifest": {
+    "version": 1,
+    "install": {
+      "bacon": {
+        "pkg-path": "bacon"
+      },
+      "cargo-nextest": {
+        "pkg-path": "cargo-nextest"
+      },
+      "expect": {
+        "pkg-path": "expect"
+      },
+      "just": {
+        "pkg-path": "just"
+      },
+      "omnix": {
+        "pkg-path": "omnix"
+      },
+      "openobserve": {
+        "pkg-path": "openobserve"
+      },
+      "sccache": {
+        "pkg-path": "sccache"
+      }
+    },
+    "hook": {},
+    "profile": {},
+    "options": {}
+  },
+  "packages": [
+    {
+      "attr_path": "bacon",
+      "broken": false,
+      "derivation": "/nix/store/18fd5y5nmahmc182q1i6ixli62g7nx8s-bacon-3.22.0.drv",
+      "description": "Background rust code checker",
+      "install_id": "bacon",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "bacon-3.22.0",
+      "pname": "bacon",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T04:35:12.313459Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "3.22.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/d1ikw8xrns7cbfqypwcgxcchwzvdq7cg-bacon-3.22.0"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "bacon",
+      "broken": false,
+      "derivation": "/nix/store/spb7hxp071fs6cxigzywb2zx9sizbjq9-bacon-3.22.0.drv",
+      "description": "Background rust code checker",
+      "install_id": "bacon",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "bacon-3.22.0",
+      "pname": "bacon",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:16:57.316155Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "3.22.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/kmhjc2p8hxf3hkdja6cqi0khqda5jxv4-bacon-3.22.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "bacon",
+      "broken": false,
+      "derivation": "/nix/store/bkh5kw76mk876v8c41nl4qsj3icsnpph-bacon-3.22.0.drv",
+      "description": "Background rust code checker",
+      "install_id": "bacon",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "bacon-3.22.0",
+      "pname": "bacon",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:56:06.051810Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "3.22.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/5ymilhncmbc9iw2il7zj5wzpv7alnhd8-bacon-3.22.0"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "bacon",
+      "broken": false,
+      "derivation": "/nix/store/zvy5znv37ab26yb3s2wa45sxx00frvbc-bacon-3.22.0.drv",
+      "description": "Background rust code checker",
+      "install_id": "bacon",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "bacon-3.22.0",
+      "pname": "bacon",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T06:51:06.964170Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "3.22.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/19ca86jyjzy2r6kppssjc0y9r8knxcpf-bacon-3.22.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "cargo-nextest",
+      "broken": false,
+      "derivation": "/nix/store/4zmwiw1a2h3ic2mgmy39lr7giw3kxd24-cargo-nextest-0.9.116.drv",
+      "description": "Next-generation test runner for Rust projects",
+      "install_id": "cargo-nextest",
+      "license": "[ MIT, Apache-2.0 ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "cargo-nextest-0.9.116",
+      "pname": "cargo-nextest",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T04:35:12.420257Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.9.116",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/qka980gzcmy1088s71cnkjjarzixkpnp-cargo-nextest-0.9.116"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "cargo-nextest",
+      "broken": false,
+      "derivation": "/nix/store/gf6d4rkqn1f549cc49g7n7alaqp1r6a3-cargo-nextest-0.9.116.drv",
+      "description": "Next-generation test runner for Rust projects",
+      "install_id": "cargo-nextest",
+      "license": "[ MIT, Apache-2.0 ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "cargo-nextest-0.9.116",
+      "pname": "cargo-nextest",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:16:57.467790Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.9.116",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/jrf3dlbbfimirrb6j4i2ixvbfzi0idfp-cargo-nextest-0.9.116"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "cargo-nextest",
+      "broken": false,
+      "derivation": "/nix/store/1lyv6hgr2rfibmikin7zsz5h5nlc6xl9-cargo-nextest-0.9.116.drv",
+      "description": "Next-generation test runner for Rust projects",
+      "install_id": "cargo-nextest",
+      "license": "[ MIT, Apache-2.0 ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "cargo-nextest-0.9.116",
+      "pname": "cargo-nextest",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:56:06.158998Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.9.116",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/ab9nrmmahp68rc4kwh1zf5djgc85fksd-cargo-nextest-0.9.116"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "cargo-nextest",
+      "broken": false,
+      "derivation": "/nix/store/gi08z0zzgrk3l5i43d2zhfmap40i9wd1-cargo-nextest-0.9.116.drv",
+      "description": "Next-generation test runner for Rust projects",
+      "install_id": "cargo-nextest",
+      "license": "[ MIT, Apache-2.0 ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "cargo-nextest-0.9.116",
+      "pname": "cargo-nextest",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T06:51:07.139122Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.9.116",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/q8rz0czl532adsfj1hcpw4bhxzrfy5q1-cargo-nextest-0.9.116"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "expect",
+      "broken": false,
+      "derivation": "/nix/store/89pkdygh6mkg5xqsqj7hk1vkqfz9vwvg-expect-5.45.4.drv",
+      "description": "Tool for automating interactive applications",
+      "install_id": "expect",
+      "license": "Public Domain",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "expect-5.45.4",
+      "pname": "expect",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T04:35:13.066222Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.45.4",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "dev": "/nix/store/z7d34c1jnpa7z29zjkk9j08nbp7z43pn-expect-5.45.4-dev",
+        "out": "/nix/store/w1m9bq7prl85bs3ji148yjagzp1gmi6m-expect-5.45.4"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "expect",
+      "broken": false,
+      "derivation": "/nix/store/whapf3qxgqbl150kvq4hqxzpg6pavgb3-expect-5.45.4.drv",
+      "description": "Tool for automating interactive applications",
+      "install_id": "expect",
+      "license": "Public Domain",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "expect-5.45.4",
+      "pname": "expect",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:16:58.364100Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.45.4",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "dev": "/nix/store/c6dlrnqxw428ywl8ip61r1b72ngdngm8-expect-5.45.4-dev",
+        "out": "/nix/store/9m8slcss3k1dzwq3ka9yxkz1a1k4w54i-expect-5.45.4"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "expect",
+      "broken": false,
+      "derivation": "/nix/store/m8i88aczcx15xcs7gic649bnjwm7ixs5-expect-5.45.4.drv",
+      "description": "Tool for automating interactive applications",
+      "install_id": "expect",
+      "license": "Public Domain",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "expect-5.45.4",
+      "pname": "expect",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:56:06.796665Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.45.4",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "dev": "/nix/store/s531p66vrlvclilvhkfyw5vlffkjcwg5-expect-5.45.4-dev",
+        "out": "/nix/store/62kbl42b5lkv90nqvky8ix8ixqx1py54-expect-5.45.4"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "expect",
+      "broken": false,
+      "derivation": "/nix/store/hgv79xdz5k35db5fid4rq8y2xfgjgbvk-expect-5.45.4.drv",
+      "description": "Tool for automating interactive applications",
+      "install_id": "expect",
+      "license": "Public Domain",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "expect-5.45.4",
+      "pname": "expect",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T06:51:08.144828Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.45.4",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "dev": "/nix/store/bnznqmd95g55kyvvrnyyqbcfss345vbc-expect-5.45.4-dev",
+        "out": "/nix/store/6qph4dcsfb5cnzcxlj4v2xfdlb5cmmp5-expect-5.45.4"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "just",
+      "broken": false,
+      "derivation": "/nix/store/bqc56vmmmjan3cak3gs1irlp8yh3j104-just-1.46.0.drv",
+      "description": "Handy way to save and run project-specific commands",
+      "install_id": "just",
+      "license": "CC0-1.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "just-1.46.0",
+      "pname": "just",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T04:35:28.962189Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.46.0",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/db99chhg7z1p8x4kqsnf4hna33yab8jd-just-1.46.0-doc",
+        "man": "/nix/store/faqgfslw33szczc60xvbsddag1vpm6qg-just-1.46.0-man",
+        "out": "/nix/store/kms72z6m9ny9xc8jran5xapikqsbhm5q-just-1.46.0"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "just",
+      "broken": false,
+      "derivation": "/nix/store/911pgpn6c6q3irahdvbsin84j1fbq5xv-just-1.46.0.drv",
+      "description": "Handy way to save and run project-specific commands",
+      "install_id": "just",
+      "license": "CC0-1.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "just-1.46.0",
+      "pname": "just",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:17:18.087290Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.46.0",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/x29kkagia2b2hw20qj0m5r256cvi3fk7-just-1.46.0-doc",
+        "man": "/nix/store/jcrjba1fjd86vdbh8iwj37cbw0ngn26v-just-1.46.0-man",
+        "out": "/nix/store/84hs79g4rgwpd8vpvrsnibmfh2qk08fq-just-1.46.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "just",
+      "broken": false,
+      "derivation": "/nix/store/rqdimcknd0av853m34x1245zp40nzmd4-just-1.46.0.drv",
+      "description": "Handy way to save and run project-specific commands",
+      "install_id": "just",
+      "license": "CC0-1.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "just-1.46.0",
+      "pname": "just",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:56:21.963709Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.46.0",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/40bl31lv2wy1p7yfafzzh1wip3pc0iga-just-1.46.0-doc",
+        "man": "/nix/store/svaa8vdlzdgbm5plfk3bvyawnvkj7x36-just-1.46.0-man",
+        "out": "/nix/store/dj01bb0rk1czx6wdymfswh4as56xsbkw-just-1.46.0"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "just",
+      "broken": false,
+      "derivation": "/nix/store/sapz2v0kcbxii925swwgd37ar10wclnn-just-1.46.0.drv",
+      "description": "Handy way to save and run project-specific commands",
+      "install_id": "just",
+      "license": "CC0-1.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "just-1.46.0",
+      "pname": "just",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T06:51:28.661357Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.46.0",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/db447q0xh3xdhaz8b8mc6k02sl2ckgdc-just-1.46.0-doc",
+        "man": "/nix/store/7cjc376r94pkwnlcvaqrna8k8q2spvkc-just-1.46.0-man",
+        "out": "/nix/store/n4g7fjn0b4m0rfjaqw2y4czvz6za1iwr-just-1.46.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "omnix",
+      "broken": false,
+      "derivation": "/nix/store/41k0xb2xszsqbzbanvv4nl570cdn2f2n-omnix-1.3.2.drv",
+      "description": "Nix companion to improve developer experience",
+      "install_id": "omnix",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "omnix-1.3.2",
+      "pname": "omnix",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T04:35:41.933690Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.3.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/sicgcr3as24f276g70h5094ca1pn06j7-omnix-1.3.2"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "omnix",
+      "broken": false,
+      "derivation": "/nix/store/193pzxx9xd59jlr27xz8if9hxnli5cm5-omnix-1.3.2.drv",
+      "description": "Nix companion to improve developer experience",
+      "install_id": "omnix",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "omnix-1.3.2",
+      "pname": "omnix",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:17:40.472447Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.3.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/ij82aj6015rn92dw3caw0d9j9rwyab5z-omnix-1.3.2"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "omnix",
+      "broken": false,
+      "derivation": "/nix/store/maw3bpxv0p7n67djfk0dcq1jv0hfh4c4-omnix-1.3.2.drv",
+      "description": "Nix companion to improve developer experience",
+      "install_id": "omnix",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "omnix-1.3.2",
+      "pname": "omnix",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:56:33.890938Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.3.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/23nilwq4hxr76pbx33xxb2v8mqxb5v2h-omnix-1.3.2"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "omnix",
+      "broken": false,
+      "derivation": "/nix/store/9d9r2w6yqacs6wwv3fj1v9pq9sbv9ihg-omnix-1.3.2.drv",
+      "description": "Nix companion to improve developer experience",
+      "install_id": "omnix",
+      "license": "AGPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "omnix-1.3.2",
+      "pname": "omnix",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T06:51:53.656162Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.3.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/x08m5jswkwnrvcd3lj7isi4c3zf1wrv9-omnix-1.3.2"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "openobserve",
+      "broken": false,
+      "derivation": "/nix/store/7bk6kmyqmllxfc721w1f45q3sp548ckx-openobserve-0.40.0.drv",
+      "description": "Cloud-native observability platform built specifically for logs, metrics, traces, analytics & realtime user-monitoring",
+      "install_id": "openobserve",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "openobserve-0.40.0",
+      "pname": "openobserve",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T04:35:42.209178Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.40.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/my90ffq6a9q63a03vz321yhqvsqvmjf8-openobserve-0.40.0"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "openobserve",
+      "broken": false,
+      "derivation": "/nix/store/zilz8w6cw896v8bfjxr7428w2jjks3hl-openobserve-0.40.0.drv",
+      "description": "Cloud-native observability platform built specifically for logs, metrics, traces, analytics & realtime user-monitoring",
+      "install_id": "openobserve",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "openobserve-0.40.0",
+      "pname": "openobserve",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:17:40.970701Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.40.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/k72s6x2a6ncfqp28vsnsdahw38d8qc7k-openobserve-0.40.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "openobserve",
+      "broken": false,
+      "derivation": "/nix/store/hd71llzypdwdzmyxs778s5ws3lxfyd8j-openobserve-0.40.0.drv",
+      "description": "Cloud-native observability platform built specifically for logs, metrics, traces, analytics & realtime user-monitoring",
+      "install_id": "openobserve",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "openobserve-0.40.0",
+      "pname": "openobserve",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:56:34.149596Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.40.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/9lshbyi06qnr3crf4wj101k964pwkmgm-openobserve-0.40.0"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "openobserve",
+      "broken": false,
+      "derivation": "/nix/store/lkplbn3xxr49xwzkz1x9l7b1r6shdmin-openobserve-0.40.0.drv",
+      "description": "Cloud-native observability platform built specifically for logs, metrics, traces, analytics & realtime user-monitoring",
+      "install_id": "openobserve",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "openobserve-0.40.0",
+      "pname": "openobserve",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T06:51:54.212100Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.40.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/qa3a8z348bqhv594wiyj793is2bibmy7-openobserve-0.40.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "sccache",
+      "broken": false,
+      "derivation": "/nix/store/89a4wmfv0krdyfqg78hddq3r1ip9fqlm-sccache-0.13.0.drv",
+      "description": "Ccache with Cloud Storage",
+      "install_id": "sccache",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "sccache-0.13.0",
+      "pname": "sccache",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T04:36:57.950783Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.13.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/2v92gm7x34djarsd20q2cg74vrcfnba9-sccache-0.13.0"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "sccache",
+      "broken": false,
+      "derivation": "/nix/store/yw4jmpl9wa6crs3pwg1qa71l2294ph4l-sccache-0.13.0.drv",
+      "description": "Ccache with Cloud Storage",
+      "install_id": "sccache",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "sccache-0.13.0",
+      "pname": "sccache",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:19:14.753725Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.13.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/r86dnn5y6b9bq819lvid5y2w9yikd0v4-sccache-0.13.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "sccache",
+      "broken": false,
+      "derivation": "/nix/store/92ib3zmdc1fm00ln61yb0mahz5vq1vqi-sccache-0.13.0.drv",
+      "description": "Ccache with Cloud Storage",
+      "install_id": "sccache",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "sccache-0.13.0",
+      "pname": "sccache",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T05:57:44.062206Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.13.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/w62dywyz9wjqp4arz01hyqc85r0n17v3-sccache-0.13.0"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "sccache",
+      "broken": false,
+      "derivation": "/nix/store/q9890zzskjw57prxgcm2aa15pcpys1hl-sccache-0.13.0.drv",
+      "description": "Ccache with Cloud Storage",
+      "install_id": "sccache",
+      "license": "Apache-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=c5296fdd05cfa2c187990dd909864da9658df755",
+      "name": "sccache-0.13.0",
+      "pname": "sccache",
+      "rev": "c5296fdd05cfa2c187990dd909864da9658df755",
+      "rev_count": 933481,
+      "rev_date": "2026-01-23T12:18:02Z",
+      "scrape_date": "2026-01-26T06:53:31.969523Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.13.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/9szaij1dml3snq44z76m2fdwjayh4zc9-sccache-0.13.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    }
+  ]
+}
