@@ -19,7 +19,7 @@ worktree:
     base_ref: origin/main
 agent:
     # Enable agent functionality in the web UI (true, false)
-    enabled: false
+    enabled: true
     # Default mode for agent sessions (act, plan)
     default_mode: act
 server:

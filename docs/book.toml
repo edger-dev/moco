@@ -1,0 +1,9 @@
+[book]
+title = "moco"
+authors = []
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "dist"
