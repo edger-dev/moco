@@ -20,18 +20,18 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Nix build outputs
+result
+result-*
+
+# Dioxus web build output
+dist/
 .direnv/
+.envrc.local
 
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
+# mdbook output
+docs/dist/
 
-# Gas Town (added by gt)
-.runtime/
-.claude/
-.logs/
-__pycache__/
-state.json
-CLAUDE.md
-CLAUDE.local.md
+# bacon diagnostics export
+.bacon-claude-diagnostics
+staging/
