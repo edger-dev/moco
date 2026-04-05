@@ -2,12 +2,6 @@
 
 A general-purpose plugin framework where **cells** provide composable functionality through typed **functions**, with specs defined via [Styx](https://github.com/nicholasgasior/styx) schemas.
 
-## Beads setup
-
-```bash
-bd dolt remote add origin git+https://github.com/edger-dev/moco.git
-```
-
 
 ## Core Concepts
 
