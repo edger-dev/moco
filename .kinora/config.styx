@@ -1,0 +1,6 @@
+repo-url https://github.com/edger-dev/moco.git
+roots {
+  specs { policy "never" }
+  tasks { policy "never" }
+  inbox { policy "never" }
+}

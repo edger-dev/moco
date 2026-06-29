@@ -60,15 +60,15 @@
         "crane": "crane",
         "fenix": "fenix",
         "flake-utils": "flake-utils",
-        "mdbook-beans": "mdbook-beans",
+        "kinora-src": "kinora-src",
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1775281964,
-        "narHash": "sha256-EVEaralPSyWVr20oWWTPpwSZHrvY10+xXiPIKplK5mE=",
+        "lastModified": 1782728046,
+        "narHash": "sha256-ZwLw4n9X0pm75E48YYajW3WfkHTb8iqOt23TfmuIT1M=",
         "owner": "edger-dev",
         "repo": "jig",
-        "rev": "8599d6b4429e1758e49724c64c2812d6c30be87a",
+        "rev": "436c7c839bb8ffd7ff5dcfd5010b6f5ec5141c49",
         "type": "github"
       },
       "original": {
@@ -77,37 +77,19 @@
         "type": "github"
       }
     },
-    "mdbook-beans": {
-      "inputs": {
-        "crane": [
-          "jig",
-          "crane"
-        ],
-        "fenix": [
-          "jig",
-          "fenix"
-        ],
-        "flake-utils": [
-          "jig",
-          "flake-utils"
-        ],
-        "nixpkgs": [
-          "jig",
-          "nixpkgs"
-        ]
-      },
+    "kinora-src": {
+      "flake": false,
       "locked": {
-        "lastModified": 1774924792,
-        "narHash": "sha256-pUdWCC2waY/DeDEs3DYDyNnSDnQF6puE0OAswVAmLmw=",
+        "lastModified": 1782720879,
+        "narHash": "sha256-yKyOJCApWY/oy3zUgxwXn5FslwuhPnGcp/RESYRcDtM=",
         "owner": "edger-dev",
-        "repo": "mdbook-beans",
-        "rev": "86b19955dcd417f590ec6b050655b6452dc7fcb9",
+        "repo": "kinora",
+        "rev": "5a376e0f645421d71d66d96321c30335b4dde5b2",
         "type": "github"
       },
       "original": {
         "owner": "edger-dev",
-        "ref": "main",
-        "repo": "mdbook-beans",
+        "repo": "kinora",
         "type": "github"
       }
     },

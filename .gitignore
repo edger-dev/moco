@@ -15,6 +15,9 @@ result-*
 .direnv/
 .envrc.local
 
+# jig skill symlinks (regenerated into the nix store by the devShell hook)
+.claude/skills/
+
 # bacon diagnostics export
 .bacon-claude-diagnostics
 

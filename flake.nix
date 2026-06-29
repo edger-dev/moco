@@ -22,6 +22,7 @@
       }
       {
         rust = { wasm = true; };
-        docs = { beans = true; };
+        docs = {};
+        kinora = {};
       };
 }
