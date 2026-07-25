@@ -738,6 +738,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "moco-job"
+version = "0.1.0-dev"
+dependencies = [
+ "moco-core",
+]
+
+[[package]]
 name = "moco-macros"
 version = "0.1.0-dev"
 dependencies = [

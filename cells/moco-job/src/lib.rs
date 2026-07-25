@@ -1,0 +1,80 @@
+//! moco-job — the agent-first job substrate.
+//!
+//! Every consequential action is an addressable, observable, controllable,
+//! durable **job** — never a blocking RPC that hides its state until it returns.
+//! v1 realizes this single-node and in-process, as a moco cell riding (later) on
+//! the hub for transport.
+//!
+//! implements: job-substrate-is-a-moco-cell-layer
+
+pub mod error;
+pub mod job;
+pub mod registry;
+
+pub use error::JobError;
+pub use job::{JobId, JobRequest, JobStatus, Outcome, Tail};
+pub use registry::JobRegistry;
+
+use moco_core::{Cell, CellSpec, Func, FuncSpec};
+
+/// The job cell: exposes the job surface as moco functions.
+pub struct JobCell;
+
+impl Cell for JobCell {
+    const SPEC: &'static CellSpec = &CellSpec {
+        name: "job",
+        version: "0.1.0-dev",
+        title: "Job Cell",
+        description: "Agent-first job substrate: run commands as observable, controllable, durable jobs",
+    };
+}
+
+pub struct StartJob;
+
+impl Func for StartJob {
+    const SPEC: &'static FuncSpec = &FuncSpec {
+        name: "start",
+        title: "Start Job",
+        description: "Spawn a command as a detached, file-backed job and return its id",
+    };
+}
+
+pub struct TailJob;
+
+impl Func for TailJob {
+    const SPEC: &'static FuncSpec = &FuncSpec {
+        name: "tail",
+        title: "Tail Job",
+        description: "Read a job's output incrementally, with its live status",
+    };
+}
+
+pub struct WaitJob;
+
+impl Func for WaitJob {
+    const SPEC: &'static FuncSpec = &FuncSpec {
+        name: "wait",
+        title: "Wait for Job",
+        description: "Block until a job is terminal and return its outcome (resumable by id)",
+    };
+}
+
+pub struct KillJob;
+
+impl Func for KillJob {
+    const SPEC: &'static FuncSpec = &FuncSpec {
+        name: "kill",
+        title: "Kill Job",
+        description: "Terminate a running job",
+    };
+}
+
+pub struct RunJob;
+
+impl Func for RunJob {
+    const SPEC: &'static FuncSpec = &FuncSpec {
+        name: "run",
+        title: "Run Job",
+        description: "Blocking sugar over start + wait, for quick commands",
+    };
+}
