@@ -93,11 +93,13 @@ impl RuleSet {
 ///
 /// implements: rule-set-target-owned-human-mutated
 pub struct NodePolicy {
-    pub rules: RuleSet,
+    /// Private, not `pub`: a policy is read-only to everyone outside this crate.
+    /// Widening governance must not be reachable by holding a `NodePolicy`.
+    pub(crate) rules: RuleSet,
     /// Every job's cwd must resolve within this root; `..`-escape is an error.
-    pub allowed_root: PathBuf,
+    pub(crate) allowed_root: PathBuf,
     /// How long a pending job waits for a decision before failing closed.
-    pub approval_timeout: Duration,
+    pub(crate) approval_timeout: Duration,
 }
 
 impl NodePolicy {
@@ -112,6 +114,24 @@ impl NodePolicy {
     pub fn with_approval_timeout(mut self, timeout: Duration) -> Self {
         self.approval_timeout = timeout;
         self
+    }
+
+    /// Read the node's rule-set. Read-only: there is no accessor that yields a
+    /// mutable rule-set or appends a rule.
+    ///
+    /// implements: rule-set-target-owned-human-mutated
+    pub fn rules(&self) -> &RuleSet {
+        &self.rules
+    }
+
+    /// The root every job's cwd must resolve inside.
+    pub fn allowed_root(&self) -> &std::path::Path {
+        &self.allowed_root
+    }
+
+    /// How long a pending job waits before it fails closed.
+    pub fn approval_timeout(&self) -> Duration {
+        self.approval_timeout
     }
 }
 

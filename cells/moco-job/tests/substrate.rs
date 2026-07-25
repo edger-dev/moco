@@ -20,7 +20,7 @@ fn cwd() -> std::path::PathBuf {
 /// An `echo` job captures its output (readable via `tail`) and exits 0.
 #[test]
 fn echo_job_captures_output_and_exits_zero() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let id = reg.start(JobRequest::new(["echo", "hello"], cwd())).unwrap();
 
     let outcome = reg.wait(&id).unwrap();
@@ -38,7 +38,7 @@ fn echo_job_captures_output_and_exits_zero() {
 /// A long-running job can be killed, and its terminal record says so.
 #[test]
 fn sleep_job_can_be_killed() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let id = reg.start(JobRequest::new(["sleep", "10"], cwd())).unwrap();
 
     reg.kill(&id).unwrap();
@@ -50,7 +50,7 @@ fn sleep_job_can_be_killed() {
 /// A job that outlives its execution deadline lands `TimedOut`.
 #[test]
 fn job_past_deadline_times_out() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let req = JobRequest::new(["sleep", "10"], cwd()).with_deadline(Duration::from_millis(100));
 
     let outcome = reg.run(req).unwrap();
@@ -60,7 +60,7 @@ fn job_past_deadline_times_out() {
 /// `run` is exactly `start` + `wait` sugar and returns the terminal outcome.
 #[test]
 fn run_is_start_plus_wait_sugar() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let outcome = reg.run(JobRequest::new(["true"], cwd())).unwrap();
     assert_eq!(outcome.status, JobStatus::Done { code: 0 });
 }
@@ -68,7 +68,7 @@ fn run_is_start_plus_wait_sugar() {
 /// Concurrent jobs on one registry get distinct ids.
 #[test]
 fn two_jobs_get_distinct_ids() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let a = reg.start(JobRequest::new(["true"], cwd())).unwrap();
     let b = reg.start(JobRequest::new(["true"], cwd())).unwrap();
     assert_ne!(a, b);
@@ -80,7 +80,7 @@ fn two_jobs_get_distinct_ids() {
 /// nothing new and the offset does not move.
 #[test]
 fn tail_reads_incrementally_from_offset() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let id = reg.start(JobRequest::new(["echo", "hello"], cwd())).unwrap();
     reg.wait(&id).unwrap();
 
@@ -95,7 +95,7 @@ fn tail_reads_incrementally_from_offset() {
 /// Spawning a program that does not exist is a legible `Spawn` error.
 #[test]
 fn spawn_of_missing_program_errors() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let err = reg
         .start(JobRequest::new(["definitely-not-a-real-program-xyz"], cwd()))
         .unwrap_err();
@@ -105,7 +105,7 @@ fn spawn_of_missing_program_errors() {
 /// A job with no program is rejected before any spawn.
 #[test]
 fn empty_argv_is_rejected() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let err = reg
         .start(JobRequest::new(Vec::<String>::new(), cwd()))
         .unwrap_err();
@@ -115,7 +115,7 @@ fn empty_argv_is_rejected() {
 /// Operating on an unknown id is `NotFound`, not a panic.
 #[test]
 fn unknown_job_is_not_found() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     let err = reg.wait(&JobId(999)).unwrap_err();
     assert!(matches!(err, JobError::NotFound(_)), "got {err:?}");
 }

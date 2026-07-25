@@ -15,17 +15,22 @@ use crate::rules::{Decision, Disposition, NodePolicy};
 /// How often `wait` polls a running child for exit / deadline / decision.
 const POLL: Duration = Duration::from_millis(10);
 
-/// Process-global sequence for capture-file names. A `JobId` is only unique
-/// within its registry, so it cannot name the file — two registries in one
-/// process would collide on `job 0`. This never resets.
+/// Process-global sequence, used to name the per-registry capture directory.
 static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The live bookkeeping for one job.
 struct JobHandle {
     /// The running child, taken once the job reaches a terminal state.
     child: Option<Child>,
-    /// Path of the file its stdout+stderr are captured to (the tail source).
+    /// Path of the file its stdout+stderr are captured to. Kept for cleanup;
+    /// output is always read and written through the handles below, never by
+    /// re-opening this path (which would be a swap race).
     capture: PathBuf,
+    /// Write handle handed to the child. Held open from job creation so a spawn
+    /// never has to re-open the capture by name.
+    capture_write: File,
+    /// Read handle used by `tail`, cloned and seeked per call.
+    capture_read: File,
     status: JobStatus,
     deadline: Option<Duration>,
     /// When the current phase began: entry to `pending` for a job awaiting a
@@ -45,6 +50,9 @@ struct Inner {
     // v1: jobs are retained for the registry's lifetime (no eviction yet). Their
     // capture files and any unreaped children are released on JobHandle drop.
     jobs: HashMap<JobId, JobHandle>,
+    /// The private 0700 directory holding this registry's capture files,
+    /// created on first use.
+    capture_dir: Option<PathBuf>,
 }
 
 impl Drop for JobHandle {
@@ -60,7 +68,46 @@ impl Drop for JobHandle {
     }
 }
 
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(dir) = self.capture_dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Create this registry's private capture directory.
+///
+/// Captures must not live directly in a world-writable temp dir: a job running
+/// as the daemon's own uid could pre-create a predictable capture path as a
+/// symlink and have the daemon truncate and write through it. A fresh
+/// owner-only directory plus `create_new` on every capture closes that.
+fn make_capture_dir() -> Result<PathBuf, JobError> {
+    let dir = std::env::temp_dir().join(format!(
+        "moco-job-{}-{}",
+        std::process::id(),
+        CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // mode at creation, not a later chmod: no window where it is group/world readable.
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(JobError::Io)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&dir).map_err(JobError::Io)?;
+    }
+    Ok(dir)
+}
+
 /// Resolve `cwd` to an absolute, symlink-resolved path confined within `root`.
+///
+/// Note this is the *starting* directory only — a spawned process may `chdir`
+/// elsewhere. The rule-set, not the cwd, is the real containment.
 ///
 /// implements: argv-not-shell (the cwd-confinement half)
 fn confine(cwd: &Path, root: &Path) -> Result<PathBuf, String> {
@@ -70,6 +117,8 @@ fn confine(cwd: &Path, root: &Path) -> Result<PathBuf, String> {
     let resolved = cwd
         .canonicalize()
         .map_err(|e| format!("cwd '{}' does not resolve: {e}", cwd.display()))?;
+    // `Path::starts_with` compares whole components, so `/tmp/foobar` is NOT
+    // inside `/tmp/foo`. Do not replace this with a string prefix test.
     if resolved.starts_with(&root) {
         Ok(resolved)
     } else {
@@ -100,12 +149,18 @@ fn effective_path() -> String {
     std::env::var("PATH").unwrap_or_default()
 }
 
-/// Resolve `program` the way a spawn would: a path with a separator is taken
-/// as-is, a bare name is searched on PATH.
-fn resolve_program(program: &str) -> Option<PathBuf> {
-    let p = Path::new(program);
-    if p.components().count() > 1 {
-        return is_executable(p).then(|| p.to_path_buf());
+/// Resolve `program` the way the spawn will: a name containing a separator is
+/// used as given (relative to the job's `cwd`), a bare name is searched on PATH.
+/// Mirrors `execvp`, so preflight names the binary that would actually run.
+fn resolve_program(program: &str, cwd: &Path) -> Option<PathBuf> {
+    if program.contains('/') {
+        let p = Path::new(program);
+        let candidate = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        };
+        return is_executable(&candidate).then_some(candidate);
     }
     std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
         let candidate = dir.join(program);
@@ -113,29 +168,23 @@ fn resolve_program(program: &str) -> Option<PathBuf> {
     })
 }
 
-/// Spawn `argv` directly into a file-backed capture. Never goes through a shell.
+/// Spawn `argv` directly into an already-open, file-backed capture. Never goes
+/// through a shell, and never re-opens the capture by path.
 ///
 /// implements: argv-not-shell
 /// implements: job-durability-both-kill-vectors (file-backed stdio half)
-fn spawn_child(argv: &[String], cwd: &Path, capture: &Path) -> Result<Child, JobError> {
+fn spawn_child(argv: &[String], cwd: &Path, capture: &File) -> Result<Child, JobError> {
     let (program, args) = argv.split_first().ok_or(JobError::EmptyArgv)?;
 
-    let file = File::options()
-        .append(true)
-        .open(capture)
-        .map_err(JobError::Io)?;
-    // stdout and stderr share one file description (via try_clone / dup), so
-    // their writes advance a single offset and interleave in causal order.
-    // Do NOT split this into two separately-opened files — that races the
-    // offset and corrupts the capture.
-    let stdout = file.try_clone().map_err(JobError::Io)?;
+    let stdout = capture.try_clone().map_err(JobError::Io)?;
+    let stderr = capture.try_clone().map_err(JobError::Io)?;
 
     Command::new(program)
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(file))
+        .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|source| JobError::Spawn {
             program: program.clone(),
@@ -153,20 +202,26 @@ fn spawn_child(argv: &[String], cwd: &Path, capture: &Path) -> Result<Child, Job
 ///
 /// implements: governed-command-is-a-job
 /// implements: job-is-the-unit-not-rpc
-#[derive(Default)]
 pub struct JobRegistry {
     inner: Mutex<Inner>,
     /// The node's governance. `None` means an ungoverned registry: a trusted
     /// local caller (e.g. supervised dev processes) runs without a gate. When
     /// set, every `start` passes the gate first, and an argv matching no rule
     /// fails closed.
+    ///
+    /// Deliberately no `Default`/`new()`: an ungoverned registry must be asked
+    /// for by name so it can never be produced by `..Default::default()`.
     policy: Option<NodePolicy>,
 }
 
 impl JobRegistry {
-    /// An ungoverned registry — the bare substrate, for a trusted local caller.
-    pub fn new() -> Self {
-        Self::default()
+    /// An **ungoverned** registry — the bare substrate, no rule-set in front,
+    /// for a trusted local caller (e.g. supervised dev processes).
+    pub fn ungoverned() -> Self {
+        Self {
+            inner: Mutex::new(Inner::default()),
+            policy: None,
+        }
     }
 
     /// A registry governed by `policy`: every `start` is gated before it spawns.
@@ -195,6 +250,15 @@ impl JobRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// The disposition this registry gives an argv.
+    fn disposition(&self, argv: &[String]) -> Disposition {
+        match &self.policy {
+            Some(policy) => policy.rules.evaluate(argv),
+            // Ungoverned: nothing gates the spawn.
+            None => Disposition::Allow,
+        }
+    }
+
     /// Resolve what a real run *would* do — without queuing or running anything.
     ///
     /// Every field is reported, so one read-only call surfaces every problem at
@@ -202,12 +266,6 @@ impl JobRegistry {
     ///
     /// implements: agent-self-sufficiency
     pub fn preflight(&self, argv: &[String], cwd: &Path) -> Preflight {
-        let disposition = match &self.policy {
-            Some(policy) => policy.rules.evaluate(argv),
-            // Ungoverned: nothing gates the spawn.
-            None => Disposition::Allow,
-        };
-
         let (resolved_cwd, cwd_error) = match &self.policy {
             Some(policy) => match confine(cwd, &policy.allowed_root) {
                 Ok(path) => (Some(path), None),
@@ -216,9 +274,14 @@ impl JobRegistry {
             None => (cwd.canonicalize().ok(), None),
         };
 
+        // Resolve a relative program against the cwd the job would actually get.
+        let resolve_base = resolved_cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
+
         Preflight {
-            disposition,
-            program: argv.first().and_then(|p| resolve_program(p)),
+            disposition: self.disposition(argv),
+            program: argv
+                .first()
+                .and_then(|p| resolve_program(p, &resolve_base)),
             effective_path: effective_path(),
             resolved_cwd,
             cwd_error,
@@ -244,31 +307,14 @@ impl JobRegistry {
 
         // Confine the cwd before anything else: a request that cannot name a
         // legal working directory never becomes a job.
-        let cwd = match &self.policy {
-            Some(policy) => confine(&req.cwd, &policy.allowed_root).map_err(|_| {
-                JobError::CwdEscape {
-                    cwd: req.cwd.display().to_string(),
-                    root: policy.allowed_root.display().to_string(),
-                }
-            })?,
-            None => req.cwd.clone(),
-        };
-
-        let disposition = match &self.policy {
-            Some(policy) => policy.rules.evaluate(&req.argv),
-            None => Disposition::Allow,
-        };
+        let cwd = self.confined_cwd(&req.cwd)?;
+        let disposition = self.disposition(&req.argv);
 
         let mut inner = self.locked();
         let id = JobId(inner.next_id);
         inner.next_id += 1;
 
-        let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let capture =
-            std::env::temp_dir().join(format!("moco-job-{}-{}.log", std::process::id(), seq));
-        // Create the capture up front so `tail` works uniformly, including for a
-        // job that is pending or denied and so has produced nothing.
-        File::create(&capture).map_err(JobError::Io)?;
+        let (capture, capture_write, capture_read) = Self::create_capture(&mut inner)?;
 
         let request = JobRequest {
             argv: req.argv,
@@ -279,6 +325,8 @@ impl JobRegistry {
         let mut handle = JobHandle {
             child: None,
             capture,
+            capture_write,
+            capture_read,
             status: JobStatus::PendingApproval,
             deadline: request.deadline,
             started: Instant::now(),
@@ -288,7 +336,11 @@ impl JobRegistry {
 
         match disposition {
             Disposition::Allow => {
-                handle.child = Some(spawn_child(&request.argv, &request.cwd, &handle.capture)?);
+                handle.child = Some(spawn_child(
+                    &request.argv,
+                    &request.cwd,
+                    &handle.capture_write,
+                )?);
                 handle.status = JobStatus::Running;
                 handle.started = Instant::now();
             }
@@ -305,11 +357,57 @@ impl JobRegistry {
         Ok(id)
     }
 
+    /// Resolve a request's cwd under the node's confinement, if any.
+    fn confined_cwd(&self, cwd: &Path) -> Result<PathBuf, JobError> {
+        match &self.policy {
+            Some(policy) => confine(cwd, &policy.allowed_root).map_err(|_| JobError::CwdEscape {
+                cwd: cwd.display().to_string(),
+                root: policy.allowed_root.display().to_string(),
+            }),
+            None => Ok(cwd.to_path_buf()),
+        }
+    }
+
+    /// Create a capture file inside this registry's private directory, opened
+    /// with `create_new` so an existing path (a planted symlink) is refused.
+    fn create_capture(inner: &mut Inner) -> Result<(PathBuf, File, File), JobError> {
+        let dir = match &inner.capture_dir {
+            Some(dir) => dir.clone(),
+            None => {
+                let dir = make_capture_dir()?;
+                inner.capture_dir = Some(dir.clone());
+                dir
+            }
+        };
+        let path = dir.join(format!("{}.log", inner.next_id));
+        let write = File::options()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+            .map_err(JobError::Io)?;
+        let read = File::open(&path).map_err(JobError::Io)?;
+        Ok((path, write, read))
+    }
+
     /// Record a human's decision on a job awaiting approval, transitioning it to
     /// `running` (spawning it, with any corrected argv) or `denied`.
     ///
+    /// **This is the console's capability, not the requesting agent's.** It is
+    /// the human side of the gate; when the hub lane lands it must sit behind
+    /// the operator's principal, never on the surface an agent can reach.
+    ///
     /// implements: approval-is-a-job-state
     pub fn decide(&self, id: &JobId, decision: Decision) -> Result<(), JobError> {
+        // An edited argv is a fresh proposal: re-evaluate it. A per-instance
+        // approval must never override a node-owned standing *deny*.
+        let edited_disposition = match &decision {
+            Decision::AllowOnce {
+                edited_argv: Some(argv),
+            } => Some(self.disposition(argv)),
+            _ => None,
+        };
+        let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
+
         let mut inner = self.locked();
         let handle = inner
             .jobs
@@ -319,7 +417,24 @@ impl JobRegistry {
         if handle.status != JobStatus::PendingApproval {
             return Err(JobError::NotPending(id.clone()));
         }
-        let request = handle.pending.take().ok_or(JobError::NotPending(id.clone()))?;
+
+        // The decision arrived too late: fail closed rather than spawn.
+        if approval_timeout.is_some_and(|t| handle.started.elapsed() >= t) {
+            handle.status = JobStatus::Denied(DeniedReason::NoApprover);
+            handle.pending = None;
+            return Ok(());
+        }
+
+        if edited_disposition == Some(Disposition::Deny) {
+            handle.status = JobStatus::Denied(DeniedReason::Rule);
+            handle.pending = None;
+            return Ok(());
+        }
+
+        let request = handle
+            .pending
+            .take()
+            .ok_or_else(|| JobError::NotPending(id.clone()))?;
 
         match decision {
             Decision::DenyOnce => {
@@ -329,11 +444,33 @@ impl JobRegistry {
                 // An edited argv is the correction back-channel: it, not the
                 // proposal, is what actually runs.
                 let argv = edited_argv.unwrap_or(request.argv);
-                handle.child = Some(spawn_child(&argv, &request.cwd, &handle.capture)?);
-                handle.status = JobStatus::Running;
-                // The execution deadline runs from the spawn, not from the
-                // moment the job entered the approval queue.
-                handle.started = Instant::now();
+                // Re-confine immediately before spawning: the cwd was resolved
+                // when the job was proposed, possibly long ago. This shrinks —
+                // but cannot fully close — the window in which a path component
+                // is swapped for a symlink out of the allowed root.
+                let cwd = match self.confined_cwd(&request.cwd) {
+                    Ok(cwd) => cwd,
+                    Err(e) => {
+                        handle.status = JobStatus::Denied(DeniedReason::Rule);
+                        return Err(e);
+                    }
+                };
+                match spawn_child(&argv, &cwd, &handle.capture_write) {
+                    Ok(child) => {
+                        handle.child = Some(child);
+                        handle.status = JobStatus::Running;
+                        // The execution deadline runs from the spawn, not from
+                        // the moment the job entered the approval queue.
+                        handle.started = Instant::now();
+                    }
+                    Err(e) => {
+                        // Never leave the job pending with its decision consumed:
+                        // that would strand it until the approval timeout and
+                        // report the wrong reason.
+                        handle.status = JobStatus::Denied(DeniedReason::Decision);
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(())
@@ -347,7 +484,9 @@ impl JobRegistry {
             .get(id)
             .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
-        let mut file = File::open(&handle.capture).map_err(JobError::Io)?;
+        // Read through the handle opened at job creation — never re-open by
+        // path, which a swapped file could hijack.
+        let mut file = handle.capture_read.try_clone().map_err(JobError::Io)?;
         file.seek(SeekFrom::Start(offset)).map_err(JobError::Io)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(JobError::Io)?;
@@ -370,6 +509,9 @@ impl JobRegistry {
     /// implements: rule-set-target-owned-human-mutated (the fail-closed half)
     pub fn wait(&self, id: &JobId) -> Result<Outcome, JobError> {
         loop {
+            // A child taken out under the lock and reaped after releasing it:
+            // never block the whole registry on another process exiting.
+            let mut expired: Option<Child> = None;
             {
                 let mut inner = self.locked();
                 let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
@@ -417,27 +559,38 @@ impl JobRegistry {
                         .deadline
                         .is_some_and(|dl| handle.started.elapsed() >= dl)
                     {
-                        let _ = child.kill();
-                        let _ = child.wait();
                         handle.status = JobStatus::TimedOut;
-                        handle.child = None;
-                        return Ok(Outcome {
-                            status: JobStatus::TimedOut,
-                        });
+                        expired = handle.child.take();
                     }
                 }
+            }
+
+            if let Some(mut child) = expired {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(Outcome {
+                    status: JobStatus::TimedOut,
+                });
             }
             std::thread::sleep(POLL);
         }
     }
 
-    /// Terminate a running job; `wait` will then report it `Killed`.
+    /// Terminate a job. A running job is signalled and `wait` then reports it
+    /// `Killed`; a job still awaiting approval is withdrawn rather than left
+    /// pending until the approval timeout.
     pub fn kill(&self, id: &JobId) -> Result<(), JobError> {
         let mut inner = self.locked();
         let handle = inner
             .jobs
             .get_mut(id)
             .ok_or_else(|| JobError::NotFound(id.clone()))?;
+
+        if handle.status == JobStatus::PendingApproval {
+            handle.status = JobStatus::Denied(DeniedReason::Decision);
+            handle.pending = None;
+            return Ok(());
+        }
 
         // Record operator intent regardless of the signal's result: `killed`
         // is why `wait` reports `Killed` rather than an exit code. A terminal

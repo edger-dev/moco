@@ -238,9 +238,165 @@ deny (
 /// An ungoverned registry (no policy) runs without a gate — the bare substrate.
 #[test]
 fn ungoverned_registry_has_no_gate() {
-    let reg = JobRegistry::new();
+    let reg = JobRegistry::ungoverned();
     assert!(reg.policy().is_none());
     let outcome = reg.run(JobRequest::new(["echo", "ungoverned"], root())).unwrap();
     assert_eq!(outcome.status, JobStatus::Done { code: 0 });
 }
 
+
+// ── contract tests: these pin the guarantees the design rests on ────────────
+
+/// **Shell metacharacters are inert data.** The headline security contract: a
+/// command crosses the boundary as argv and is exec'd directly, so `;` cannot
+/// chain a second command. Without this the whole gate is theatre.
+///
+/// implements: argv-not-shell
+#[test]
+fn shell_metacharacters_are_inert() {
+    let marker = std::env::temp_dir().join(format!("moco-shell-escape-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+
+    let payload = format!("x; touch {}", marker.display());
+    let rules = RuleSet::from_seed(SeedConfig {
+        allow: vec![vec!["echo".to_string(), payload.clone()]],
+        deny: vec![],
+    });
+    let reg = JobRegistry::with_policy(NodePolicy::new(rules, root()));
+
+    let id = reg
+        .start(JobRequest::new(["echo", payload.as_str()], root()))
+        .unwrap();
+    reg.wait(&id).unwrap();
+
+    assert!(
+        !marker.exists(),
+        "shell metacharacters must not execute: {marker:?} was created"
+    );
+    let out = reg.tail(&id, 0).unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.bytes).contains("; touch"),
+        "the metacharacters should appear as literal output"
+    );
+}
+
+/// Containment is component-wise: a *sibling* whose name merely shares a prefix
+/// with the allowed root is outside it. Guards against a refactor to a string
+/// prefix test, which would silently open a containment hole.
+#[test]
+fn sibling_prefix_directory_is_not_contained() {
+    let base = std::env::temp_dir().join(format!("moco-confine-{}", std::process::id()));
+    let allowed = base.join("foo");
+    let sibling = base.join("foobar");
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+
+    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed));
+    let err = reg
+        .start(JobRequest::new(["echo", "ok"], &sibling))
+        .unwrap_err();
+    assert!(matches!(err, JobError::CwdEscape { .. }), "got {err:?}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A `..` traversal out of the allowed root is rejected.
+#[test]
+fn dotdot_escape_is_rejected() {
+    let base = std::env::temp_dir().join(format!("moco-dotdot-{}", std::process::id()));
+    let allowed = base.join("inner");
+    std::fs::create_dir_all(&allowed).unwrap();
+
+    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed));
+    let err = reg
+        .start(JobRequest::new(["echo", "ok"], allowed.join("..")))
+        .unwrap_err();
+    assert!(matches!(err, JobError::CwdEscape { .. }), "got {err:?}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A symlink pointing out of the allowed root is resolved away and rejected.
+#[cfg(unix)]
+#[test]
+fn symlink_escape_is_rejected() {
+    let base = std::env::temp_dir().join(format!("moco-symlink-{}", std::process::id()));
+    let allowed = base.join("inner");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = allowed.join("escape");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed));
+    let err = reg.start(JobRequest::new(["echo", "ok"], &link)).unwrap_err();
+    assert!(matches!(err, JobError::CwdEscape { .. }), "got {err:?}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Preflight must never execute. Proven by side effect, not just by absence of
+/// a registered job.
+#[test]
+fn preflight_does_not_execute() {
+    let marker = std::env::temp_dir().join(format!("moco-preflight-exec-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+
+    let reg = governed();
+    let touch = argv(&["touch", &marker.display().to_string()]);
+    let _ = reg.preflight(&touch, &root());
+
+    assert!(!marker.exists(), "preflight must not run the command");
+}
+
+/// An edit-and-approve may not launder a **deny-listed** argv past the gate: a
+/// per-instance approval cannot override a node-owned standing prohibition.
+#[test]
+fn edited_argv_cannot_override_a_deny_rule() {
+    let reg = governed();
+    let id = reg
+        .start(JobRequest::new(["echo", "unlisted"], root()))
+        .unwrap();
+
+    // `echo nope` is deny-listed in the seed.
+    reg.decide(&id, Decision::allow_edited(["echo", "nope"]))
+        .unwrap();
+
+    let outcome = reg.wait(&id).unwrap();
+    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::Rule));
+
+    let tail = reg.tail(&id, 0).unwrap();
+    assert!(tail.bytes.is_empty(), "the denied argv must not have run");
+}
+
+/// A decision arriving after the approval window fails closed rather than
+/// spawning a long-stale proposal.
+#[test]
+fn decision_after_the_timeout_fails_closed() {
+    let reg = governed();
+    let id = reg
+        .start(JobRequest::new(["echo", "unlisted"], root()))
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300)); // policy timeout is 200ms
+
+    reg.decide(&id, Decision::allow()).unwrap();
+    let outcome = reg.wait(&id).unwrap();
+    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::NoApprover));
+}
+
+/// Killing a job that is still awaiting approval withdraws it, rather than
+/// silently doing nothing and leaving it pending.
+#[test]
+fn kill_withdraws_a_pending_job() {
+    let reg = governed();
+    let id = reg
+        .start(JobRequest::new(["echo", "unlisted"], root()))
+        .unwrap();
+
+    reg.kill(&id).unwrap();
+
+    let outcome = reg.wait(&id).unwrap();
+    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::Decision));
+}

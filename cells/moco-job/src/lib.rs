@@ -93,12 +93,10 @@ impl Func for PreflightJob {
     };
 }
 
-pub struct DecideJob;
-
-impl Func for DecideJob {
-    const SPEC: &'static FuncSpec = &FuncSpec {
-        name: "decide",
-        title: "Decide Pending Job",
-        description: "Approve (optionally with a corrected argv) or reject a job awaiting approval",
-    };
-}
+// `decide` is deliberately NOT declared as a cell Func here. It is the human
+// console's capability, not the requesting agent's: listing it beside StartJob
+// would advertise the approval gate on the very surface the gate exists to
+// constrain. It stays an in-process method until the console slice gives it an
+// operator principal.
+//
+// implements: intervention-is-the-only-human-write
