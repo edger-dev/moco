@@ -1,0 +1,2 @@
+{kind root, id 436a131ff0c7b57ecd7c50d289f14a93a6b92558f93d6f46fe52d91855f4dee4, parents (), ts 2026-07-02T00:33:14.393279154Z, author "YJ Park", provenance commit}
+{id 8e5a044100d31b8e68c729da4e8018a624b9d3bb30752b90b1fbf4e2c248da7b, version 8e5a044100d31b8e68c729da4e8018a624b9d3bb30752b90b1fbf4e2c248da7b, kind commit-archive, metadata {name rules-commit-archive}, note "", pin false, head_ts 2026-07-02T00:33:14.393279154Z, parents ()}
