@@ -54,12 +54,18 @@ fn completed_job_is_audited() {
 fn denied_attempt_is_audited_at_denial_time() {
     let reg = governed();
     // No wait() call at all: the record must already exist.
-    reg.start(JobRequest::new(["echo", "nope"], root())).unwrap();
+    reg.start(JobRequest::new(["echo", "nope"], root()))
+        .unwrap();
 
     let records = reg.audit().records().unwrap();
     assert_eq!(records.len(), 1, "a denial must be recorded immediately");
     assert_eq!(records[0].verdict, Verdict::SeedDeny);
-    assert_eq!(records[0].status, JobStatus::Denied(DeniedReason::Rule));
+    assert_eq!(
+        records[0].status,
+        JobStatus::Denied {
+            reason: DeniedReason::Rule
+        }
+    );
 }
 
 /// A human rejection is audited under its own authority.
@@ -90,7 +96,9 @@ fn no_approver_denial_is_audited() {
     assert_eq!(records[0].verdict, Verdict::NoApprover);
     assert_eq!(
         records[0].status,
-        JobStatus::Denied(DeniedReason::NoApprover)
+        JobStatus::Denied {
+            reason: DeniedReason::NoApprover
+        }
     );
 }
 
@@ -136,7 +144,8 @@ fn outcome_is_self_describing_and_matches_the_audit() {
 fn every_attempt_is_recorded() {
     let reg = governed();
     reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
-    reg.start(JobRequest::new(["echo", "nope"], root())).unwrap();
+    reg.start(JobRequest::new(["echo", "nope"], root()))
+        .unwrap();
     reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
 
     let records = reg.audit().records().unwrap();
@@ -152,15 +161,18 @@ fn every_attempt_is_recorded() {
 /// read back with their fields intact.
 #[test]
 fn file_audit_log_is_durable_and_append_only() {
-    let path =
-        std::env::temp_dir().join(format!("moco-audit-{}-{}.log", std::process::id(), "durable"));
+    let path = std::env::temp_dir().join(format!(
+        "moco-audit-{}-{}.log",
+        std::process::id(),
+        "durable"
+    ));
     let _ = std::fs::remove_file(&path);
 
     {
-        let reg = JobRegistry::with_policy(policy())
-            .with_audit(Arc::new(FileAuditLog::new(&path)));
+        let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FileAuditLog::new(&path)));
         reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
-        reg.start(JobRequest::new(["echo", "nope"], root())).unwrap();
+        reg.start(JobRequest::new(["echo", "nope"], root()))
+            .unwrap();
     }
 
     // A fresh reader over the same file sees the history the registry wrote.
@@ -170,15 +182,23 @@ fn file_audit_log_is_durable_and_append_only() {
     assert_eq!(records[0].verdict, Verdict::SeedAllow);
     assert_eq!(records[0].argv, argv(&["echo", "ok"]));
     assert_eq!(records[1].verdict, Verdict::SeedDeny);
-    assert_eq!(records[1].status, JobStatus::Denied(DeniedReason::Rule));
+    assert_eq!(
+        records[1].status,
+        JobStatus::Denied {
+            reason: DeniedReason::Rule
+        }
+    );
 
     // Appending again preserves what was there.
     {
-        let reg = JobRegistry::with_policy(policy())
-            .with_audit(Arc::new(FileAuditLog::new(&path)));
+        let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FileAuditLog::new(&path)));
         reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
     }
-    assert_eq!(reread.records().unwrap().len(), 3, "history must not be rewritten");
+    assert_eq!(
+        reread.records().unwrap().len(),
+        3,
+        "history must not be rewritten"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -188,7 +208,10 @@ fn file_audit_log_is_durable_and_append_only() {
 fn spawn_failure_names_the_searched_path() {
     let reg = JobRegistry::ungoverned();
     let err = reg
-        .start(JobRequest::new(["definitely-not-a-real-program-xyz"], root()))
+        .start(JobRequest::new(
+            ["definitely-not-a-real-program-xyz"],
+            root(),
+        ))
         .unwrap_err();
 
     match &err {

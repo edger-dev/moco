@@ -99,8 +99,8 @@ mod tests {
     #[test]
     fn test_stop_forced() {
         // trap SIGTERM to ignore it, forcing SIGKILL path
-        let mut proc = ShellProcess::spawn("sh", &["-c", "trap '' TERM; sleep 60"])
-            .expect("spawn failed");
+        let mut proc =
+            ShellProcess::spawn("sh", &["-c", "trap '' TERM; sleep 60"]).expect("spawn failed");
         let status = proc.stop().expect("stop failed");
         match status {
             ProcessStatus::Exited(_) => {}

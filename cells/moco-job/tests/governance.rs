@@ -52,10 +52,17 @@ fn seeded_allow_argv_runs() {
 #[test]
 fn seeded_deny_never_spawns() {
     let reg = governed();
-    let id = reg.start(JobRequest::new(["echo", "nope"], root())).unwrap();
+    let id = reg
+        .start(JobRequest::new(["echo", "nope"], root()))
+        .unwrap();
 
     let outcome = reg.wait(&id).unwrap();
-    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::Rule));
+    assert_eq!(
+        outcome.status,
+        JobStatus::Denied {
+            reason: DeniedReason::Rule
+        }
+    );
 
     let tail = reg.tail(&id, 0).unwrap();
     assert!(
@@ -87,7 +94,12 @@ fn unmatched_argv_pends_then_denies_on_timeout() {
     assert_eq!(tail.status, JobStatus::PendingApproval);
 
     let outcome = reg.wait(&id).unwrap();
-    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::NoApprover));
+    assert_eq!(
+        outcome.status,
+        JobStatus::Denied {
+            reason: DeniedReason::NoApprover
+        }
+    );
 }
 
 /// Approving a pending job spawns it.
@@ -115,7 +127,12 @@ fn decide_deny_once_denies_the_job() {
     reg.decide(&id, Decision::DenyOnce).unwrap();
 
     let outcome = reg.wait(&id).unwrap();
-    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::Decision));
+    assert_eq!(
+        outcome.status,
+        JobStatus::Denied {
+            reason: DeniedReason::Decision
+        }
+    );
 }
 
 /// Edit-and-approve: the corrected argv is what actually runs.
@@ -133,7 +150,10 @@ fn edited_argv_on_approve_runs_the_correction() {
     let tail = reg.tail(&id, 0).unwrap();
     let out = String::from_utf8_lossy(&tail.bytes);
     assert!(out.contains("corrected"), "got {out:?}");
-    assert!(!out.contains("wrong"), "original argv must not run, got {out:?}");
+    assert!(
+        !out.contains("wrong"),
+        "original argv must not run, got {out:?}"
+    );
 }
 
 /// A decision on a job that is not pending is an error, not a silent no-op.
@@ -151,9 +171,7 @@ fn decide_on_a_non_pending_job_errors() {
 #[test]
 fn cwd_escaping_allowed_root_is_rejected() {
     let reg = governed();
-    let err = reg
-        .start(JobRequest::new(["echo", "ok"], "/"))
-        .unwrap_err();
+    let err = reg.start(JobRequest::new(["echo", "ok"], "/")).unwrap_err();
     assert!(matches!(err, JobError::CwdEscape { .. }), "got {err:?}");
 }
 
@@ -188,7 +206,10 @@ fn preflight_resolves_program_and_path() {
     let pre = reg.preflight(&argv(&["echo", "ok"]), &root());
 
     let program = pre.program.expect("echo should resolve on PATH");
-    assert!(program.is_absolute(), "expected absolute path, got {program:?}");
+    assert!(
+        program.is_absolute(),
+        "expected absolute path, got {program:?}"
+    );
     assert!(!pre.effective_path.is_empty());
     assert!(pre.resolved_cwd.is_some());
     assert!(pre.cwd_error.is_none());
@@ -201,7 +222,10 @@ fn preflight_reports_missing_program() {
     let pre = reg.preflight(&argv(&["definitely-not-a-real-program-xyz"]), &root());
 
     assert!(pre.program.is_none());
-    assert!(!pre.effective_path.is_empty(), "must name the PATH searched");
+    assert!(
+        !pre.effective_path.is_empty(),
+        "must name the PATH searched"
+    );
 }
 
 /// Preflight reports a cwd confinement failure rather than resolving it.
@@ -240,10 +264,11 @@ deny (
 fn ungoverned_registry_has_no_gate() {
     let reg = JobRegistry::ungoverned();
     assert!(reg.policy().is_none());
-    let outcome = reg.run(JobRequest::new(["echo", "ungoverned"], root())).unwrap();
+    let outcome = reg
+        .run(JobRequest::new(["echo", "ungoverned"], root()))
+        .unwrap();
     assert_eq!(outcome.status, JobStatus::Done { code: 0 });
 }
-
 
 // ── contract tests: these pin the guarantees the design rests on ────────────
 
@@ -330,7 +355,9 @@ fn symlink_escape_is_rejected() {
     std::os::unix::fs::symlink(&outside, &link).unwrap();
 
     let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed));
-    let err = reg.start(JobRequest::new(["echo", "ok"], &link)).unwrap_err();
+    let err = reg
+        .start(JobRequest::new(["echo", "ok"], &link))
+        .unwrap_err();
     assert!(matches!(err, JobError::CwdEscape { .. }), "got {err:?}");
 
     let _ = std::fs::remove_dir_all(&base);
@@ -364,7 +391,12 @@ fn edited_argv_cannot_override_a_deny_rule() {
         .unwrap();
 
     let outcome = reg.wait(&id).unwrap();
-    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::Rule));
+    assert_eq!(
+        outcome.status,
+        JobStatus::Denied {
+            reason: DeniedReason::Rule
+        }
+    );
 
     let tail = reg.tail(&id, 0).unwrap();
     assert!(tail.bytes.is_empty(), "the denied argv must not have run");
@@ -383,7 +415,12 @@ fn decision_after_the_timeout_fails_closed() {
 
     reg.decide(&id, Decision::allow()).unwrap();
     let outcome = reg.wait(&id).unwrap();
-    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::NoApprover));
+    assert_eq!(
+        outcome.status,
+        JobStatus::Denied {
+            reason: DeniedReason::NoApprover
+        }
+    );
 }
 
 /// Killing a job that is still awaiting approval withdraws it, rather than
@@ -398,5 +435,10 @@ fn kill_withdraws_a_pending_job() {
     reg.kill(&id).unwrap();
 
     let outcome = reg.wait(&id).unwrap();
-    assert_eq!(outcome.status, JobStatus::Denied(DeniedReason::Decision));
+    assert_eq!(
+        outcome.status,
+        JobStatus::Denied {
+            reason: DeniedReason::Decision
+        }
+    );
 }

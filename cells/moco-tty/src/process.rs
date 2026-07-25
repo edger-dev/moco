@@ -59,8 +59,7 @@ impl ShellProcess {
                     close(slave_raw).ok();
                 }
 
-                let c_command =
-                    CString::new(command).unwrap_or_else(|_| c"sh".to_owned());
+                let c_command = CString::new(command).unwrap_or_else(|_| c"sh".to_owned());
                 let mut c_args: Vec<CString> = vec![c_command.clone()];
                 for arg in args {
                     if let Ok(a) = CString::new(*arg) {
@@ -81,8 +80,7 @@ impl ShellProcess {
                 let callback: Arc<Mutex<Option<IoCallback>>> = Arc::new(Mutex::new(None));
 
                 // Duplicate master fd for reader thread
-                let reader_fd =
-                    unsafe { OwnedFd::from_raw_fd(libc::dup(master_fd.as_raw_fd())) };
+                let reader_fd = unsafe { OwnedFd::from_raw_fd(libc::dup(master_fd.as_raw_fd())) };
 
                 let status_clone = Arc::clone(&status);
                 let buffer_clone = Arc::clone(&output_buffer);
@@ -90,8 +88,7 @@ impl ShellProcess {
                 let child_pid = child;
 
                 thread::spawn(move || {
-                    let mut file =
-                        unsafe { std::fs::File::from_raw_fd(reader_fd.into_raw_fd()) };
+                    let mut file = unsafe { std::fs::File::from_raw_fd(reader_fd.into_raw_fd()) };
                     let mut buf = [0u8; 4096];
 
                     loop {

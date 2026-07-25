@@ -46,11 +46,18 @@ pub enum JobStatus {
     /// Registered but not spawned: awaiting a human decision.
     PendingApproval,
     Running,
-    Done { code: i32 },
+    Done {
+        code: i32,
+    },
     Killed,
     TimedOut,
     /// Never ran, and never will.
-    Denied(DeniedReason),
+    ///
+    /// A struct variant, not a tuple one: a tuple variant wrapping another enum
+    /// does not round-trip through Styx (`@Denied@Rule` is not re-readable).
+    Denied {
+        reason: DeniedReason,
+    },
 }
 
 impl JobStatus {

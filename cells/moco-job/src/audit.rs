@@ -186,7 +186,10 @@ impl AuditSink for FileAuditLog {
         text.lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| {
-                facet_styx::from_str(line)
+                // `to_string_compact` emits a braced expression (`{job 1, …}`),
+                // which is an expression rather than a document root — so it is
+                // read back with `from_str_expr`, not `from_str`.
+                facet_styx::from_str_expr(line)
                     .map_err(|e| JobError::Audit(format!("failed to decode audit record: {e}")))
             })
             .collect()

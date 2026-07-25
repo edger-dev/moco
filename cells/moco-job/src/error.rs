@@ -44,7 +44,10 @@ impl fmt::Display for JobError {
             }
             JobError::NotFound(id) => write!(f, "no such job: {id}"),
             JobError::CwdEscape { cwd, root } => {
-                write!(f, "cwd '{cwd}' does not resolve inside allowed root '{root}'")
+                write!(
+                    f,
+                    "cwd '{cwd}' does not resolve inside allowed root '{root}'"
+                )
             }
             JobError::NotPending(id) => write!(f, "job is not awaiting approval: {id}"),
             JobError::Seed(msg) => write!(f, "{msg}"),

@@ -21,7 +21,9 @@ fn cwd() -> std::path::PathBuf {
 #[test]
 fn echo_job_captures_output_and_exits_zero() {
     let reg = JobRegistry::ungoverned();
-    let id = reg.start(JobRequest::new(["echo", "hello"], cwd())).unwrap();
+    let id = reg
+        .start(JobRequest::new(["echo", "hello"], cwd()))
+        .unwrap();
 
     let outcome = reg.wait(&id).unwrap();
     assert_eq!(outcome.status, JobStatus::Done { code: 0 });
@@ -81,7 +83,9 @@ fn two_jobs_get_distinct_ids() {
 #[test]
 fn tail_reads_incrementally_from_offset() {
     let reg = JobRegistry::ungoverned();
-    let id = reg.start(JobRequest::new(["echo", "hello"], cwd())).unwrap();
+    let id = reg
+        .start(JobRequest::new(["echo", "hello"], cwd()))
+        .unwrap();
     reg.wait(&id).unwrap();
 
     let first = reg.tail(&id, 0).unwrap();
@@ -97,7 +101,10 @@ fn tail_reads_incrementally_from_offset() {
 fn spawn_of_missing_program_errors() {
     let reg = JobRegistry::ungoverned();
     let err = reg
-        .start(JobRequest::new(["definitely-not-a-real-program-xyz"], cwd()))
+        .start(JobRequest::new(
+            ["definitely-not-a-real-program-xyz"],
+            cwd(),
+        ))
         .unwrap_err();
     assert!(matches!(err, JobError::Spawn { .. }), "got {err:?}");
 }

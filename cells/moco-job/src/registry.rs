@@ -293,6 +293,28 @@ impl JobRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Append this job's terminal record, exactly once.
+    ///
+    /// Called at the moment a job reaches a terminal state — including every
+    /// denial, which is written at denial time rather than reconstructed later.
+    /// An audit failure fails the operation: "every attempt is durable history"
+    /// is a contract, so a record that cannot be written is not silently lost.
+    ///
+    /// implements: audit-every-attempt
+    fn record(&self, id: &JobId, handle: &mut JobHandle) -> Result<(), JobError> {
+        if handle.audited {
+            return Ok(());
+        }
+        handle.audited = true;
+        self.audit.append(AuditRecord::new(
+            id.0,
+            handle.argv.clone(),
+            handle.resolved_cwd.clone(),
+            handle.verdict,
+            handle.status.clone(),
+        ))
+    }
+
     /// The disposition this registry gives an argv.
     fn disposition(&self, argv: &[String]) -> Disposition {
         match &self.policy {
@@ -322,9 +344,7 @@ impl JobRegistry {
 
         Preflight {
             disposition: self.disposition(argv),
-            program: argv
-                .first()
-                .and_then(|p| resolve_program(p, &resolve_base)),
+            program: argv.first().and_then(|p| resolve_program(p, &resolve_base)),
             effective_path: effective_path(),
             resolved_cwd,
             cwd_error,
@@ -399,12 +419,20 @@ impl JobRegistry {
                 handle.started = Instant::now();
             }
             Disposition::Deny => {
-                handle.status = JobStatus::Denied(DeniedReason::Rule);
+                handle.status = JobStatus::Denied {
+                    reason: DeniedReason::Rule,
+                };
             }
             Disposition::NeedsApproval => {
                 handle.status = JobStatus::PendingApproval;
                 handle.pending = Some(request);
             }
+        }
+
+        // A denial is history the moment it happens — never reconstructed, and
+        // never dependent on someone calling wait().
+        if handle.status.is_terminal() {
+            self.record(&id, &mut handle)?;
         }
 
         inner.jobs.insert(id.clone(), handle);
@@ -474,16 +502,20 @@ impl JobRegistry {
 
         // The decision arrived too late: fail closed rather than spawn.
         if approval_timeout.is_some_and(|t| handle.started.elapsed() >= t) {
-            handle.status = JobStatus::Denied(DeniedReason::NoApprover);
+            handle.status = JobStatus::Denied {
+                reason: DeniedReason::NoApprover,
+            };
             handle.pending = None;
-            return Ok(());
+            return self.record(id, handle);
         }
 
         if edited_disposition == Some(Disposition::Deny) {
-            handle.status = JobStatus::Denied(DeniedReason::Rule);
+            handle.status = JobStatus::Denied {
+                reason: DeniedReason::Rule,
+            };
             handle.verdict = Verdict::SeedDeny;
             handle.pending = None;
-            return Ok(());
+            return self.record(id, handle);
         }
 
         let request = handle
@@ -493,8 +525,11 @@ impl JobRegistry {
 
         match decision {
             Decision::DenyOnce => {
-                handle.status = JobStatus::Denied(DeniedReason::Decision);
+                handle.status = JobStatus::Denied {
+                    reason: DeniedReason::Decision,
+                };
                 handle.verdict = Verdict::RejectedOnce;
+                return self.record(id, handle);
             }
             Decision::AllowOnce { edited_argv } => {
                 // An edited argv is the correction back-channel: it, not the
@@ -507,7 +542,9 @@ impl JobRegistry {
                 let cwd = match self.confined_cwd(&request.cwd) {
                     Ok(cwd) => cwd,
                     Err(e) => {
-                        handle.status = JobStatus::Denied(DeniedReason::Rule);
+                        handle.status = JobStatus::Denied {
+                            reason: DeniedReason::Rule,
+                        };
                         return Err(e);
                     }
                 };
@@ -528,8 +565,11 @@ impl JobRegistry {
                         // Never leave the job pending with its decision consumed:
                         // that would strand it until the approval timeout and
                         // report the wrong reason.
-                        handle.status = JobStatus::Denied(DeniedReason::Decision);
+                        handle.status = JobStatus::Denied {
+                            reason: DeniedReason::Decision,
+                        };
                         handle.verdict = Verdict::RejectedOnce;
+                        let _ = self.record(id, handle);
                         return Err(e);
                     }
                 }
@@ -583,6 +623,7 @@ impl JobRegistry {
                     .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
                 if handle.status.is_terminal() {
+                    self.record(id, handle)?;
                     return Ok(outcome_of(handle));
                 }
 
@@ -590,8 +631,11 @@ impl JobRegistry {
                 if handle.status == JobStatus::PendingApproval
                     && approval_timeout.is_some_and(|t| handle.started.elapsed() >= t)
                 {
-                    handle.status = JobStatus::Denied(DeniedReason::NoApprover);
+                    handle.status = JobStatus::Denied {
+                        reason: DeniedReason::NoApprover,
+                    };
                     handle.pending = None;
+                    self.record(id, handle)?;
                     return Ok(outcome_of(handle));
                 }
 
@@ -608,6 +652,7 @@ impl JobRegistry {
                             }
                         };
                         handle.child = None;
+                        self.record(id, handle)?;
                         return Ok(outcome_of(handle));
                     }
 
@@ -617,6 +662,7 @@ impl JobRegistry {
                     {
                         handle.status = JobStatus::TimedOut;
                         if let Some(child) = handle.child.take() {
+                            self.record(id, handle)?;
                             expired = Some((child, outcome_of(handle)));
                         }
                     }
@@ -643,10 +689,12 @@ impl JobRegistry {
             .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
         if handle.status == JobStatus::PendingApproval {
-            handle.status = JobStatus::Denied(DeniedReason::Decision);
+            handle.status = JobStatus::Denied {
+                reason: DeniedReason::Decision,
+            };
             handle.verdict = Verdict::RejectedOnce;
             handle.pending = None;
-            return Ok(());
+            return self.record(id, handle);
         }
 
         // Record operator intent regardless of the signal's result: `killed`
