@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,11 @@ use crate::job::{JobId, JobRequest, JobStatus, Outcome, Tail};
 
 /// How often `wait` polls a running child for exit / deadline.
 const POLL: Duration = Duration::from_millis(10);
+
+/// Process-global sequence for capture-file names. A `JobId` is only unique
+/// within its registry, so it cannot name the file — two registries in one
+/// process would collide on `job 0`. This never resets.
+static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The live bookkeeping for one job.
 struct JobHandle {
@@ -28,7 +34,22 @@ struct JobHandle {
 #[derive(Default)]
 struct Inner {
     next_id: u64,
+    // v1: jobs are retained for the registry's lifetime (no eviction yet). Their
+    // capture files and any unreaped children are released on JobHandle drop.
     jobs: HashMap<JobId, JobHandle>,
+}
+
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        // Reap a still-running child so teardown leaves no zombie, then remove
+        // the file-backed capture. For a job already waited to a terminal state
+        // `child` is None, so this just deletes the file.
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_file(&self.capture);
+    }
 }
 
 /// The registry every job lives on: it owns their ids, live output, control
@@ -79,9 +100,14 @@ impl JobRegistry {
         let id = JobId(inner.next_id);
         inner.next_id += 1;
 
+        let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
         let capture =
-            std::env::temp_dir().join(format!("moco-job-{}-{}.log", std::process::id(), id.0));
+            std::env::temp_dir().join(format!("moco-job-{}-{}.log", std::process::id(), seq));
         let file = File::create(&capture).map_err(JobError::Io)?;
+        // stdout and stderr share one file description (via try_clone / dup), so
+        // their writes advance a single offset and interleave in causal order.
+        // Do NOT split this into two separately-opened files — that races the
+        // offset and corrupts the capture.
         let stdout = file.try_clone().map_err(JobError::Io)?;
 
         let child = Command::new(program)
@@ -149,19 +175,9 @@ impl JobRegistry {
                 }
 
                 if let Some(child) = handle.child.as_mut() {
-                    if handle
-                        .deadline
-                        .is_some_and(|dl| handle.started.elapsed() >= dl)
-                    {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        handle.status = JobStatus::TimedOut;
-                        handle.child = None;
-                        return Ok(Outcome {
-                            status: JobStatus::TimedOut,
-                        });
-                    }
-
+                    // Check for a real exit first: a job that finished on its own
+                    // reports its true outcome even if it also crossed its
+                    // deadline in the same tick.
                     if let Some(exit) = child.try_wait().map_err(JobError::Io)? {
                         handle.status = if handle.killed {
                             JobStatus::Killed
@@ -173,6 +189,19 @@ impl JobRegistry {
                         handle.child = None;
                         return Ok(Outcome {
                             status: handle.status.clone(),
+                        });
+                    }
+
+                    if handle
+                        .deadline
+                        .is_some_and(|dl| handle.started.elapsed() >= dl)
+                    {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        handle.status = JobStatus::TimedOut;
+                        handle.child = None;
+                        return Ok(Outcome {
+                            status: JobStatus::TimedOut,
                         });
                     }
                 }
@@ -189,10 +218,12 @@ impl JobRegistry {
             .get_mut(id)
             .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
-        if let Some(child) = handle.child.as_mut()
-            && child.kill().is_ok()
-        {
+        // Record operator intent regardless of the signal's result: `killed`
+        // is why `wait` reports `Killed` rather than an exit code. A terminal
+        // job has `child == None`, so killing it is a no-op.
+        if let Some(child) = handle.child.as_mut() {
             handle.killed = true;
+            let _ = child.kill();
         }
         Ok(())
     }

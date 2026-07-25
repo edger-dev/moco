@@ -10,7 +10,7 @@
 //! implements: argv-not-shell
 //! implements: governed-command-is-a-job
 
-use moco_job::{JobRegistry, JobRequest, JobStatus};
+use moco_job::{JobError, JobId, JobRegistry, JobRequest, JobStatus};
 use std::env;
 use std::time::Duration;
 
@@ -64,4 +64,59 @@ fn run_is_start_plus_wait_sugar() {
     let reg = JobRegistry::new();
     let outcome = reg.run(JobRequest::new(["true"], cwd())).unwrap();
     assert_eq!(outcome.status, JobStatus::Done { code: 0 });
+}
+
+/// Concurrent jobs on one registry get distinct ids.
+#[test]
+fn two_jobs_get_distinct_ids() {
+    let reg = JobRegistry::new();
+    let a = reg.start(JobRequest::new(["true"], cwd())).unwrap();
+    let b = reg.start(JobRequest::new(["true"], cwd())).unwrap();
+    assert_ne!(a, b);
+    reg.wait(&a).unwrap();
+    reg.wait(&b).unwrap();
+}
+
+/// `tail` reads incrementally: reading from a returned `next_offset` yields
+/// nothing new and the offset does not move.
+#[test]
+fn tail_reads_incrementally_from_offset() {
+    let reg = JobRegistry::new();
+    let id = reg.start(JobRequest::new(["echo", "hello"], cwd())).unwrap();
+    reg.wait(&id).unwrap();
+
+    let first = reg.tail(&id, 0).unwrap();
+    assert!(!first.bytes.is_empty());
+
+    let second = reg.tail(&id, first.next_offset).unwrap();
+    assert!(second.bytes.is_empty());
+    assert_eq!(second.next_offset, first.next_offset);
+}
+
+/// Spawning a program that does not exist is a legible `Spawn` error.
+#[test]
+fn spawn_of_missing_program_errors() {
+    let reg = JobRegistry::new();
+    let err = reg
+        .start(JobRequest::new(["definitely-not-a-real-program-xyz"], cwd()))
+        .unwrap_err();
+    assert!(matches!(err, JobError::Spawn { .. }), "got {err:?}");
+}
+
+/// A job with no program is rejected before any spawn.
+#[test]
+fn empty_argv_is_rejected() {
+    let reg = JobRegistry::new();
+    let err = reg
+        .start(JobRequest::new(Vec::<String>::new(), cwd()))
+        .unwrap_err();
+    assert!(matches!(err, JobError::EmptyArgv), "got {err:?}");
+}
+
+/// Operating on an unknown id is `NotFound`, not a panic.
+#[test]
+fn unknown_job_is_not_found() {
+    let reg = JobRegistry::new();
+    let err = reg.wait(&JobId(999)).unwrap_err();
+    assert!(matches!(err, JobError::NotFound(_)), "got {err:?}");
 }

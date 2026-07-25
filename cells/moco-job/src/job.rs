@@ -43,7 +43,10 @@ impl JobStatus {
 pub struct JobRequest {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
-    /// Optional execution deadline; a job that outlives it lands `TimedOut`.
+    /// Optional execution deadline. A job still running past it lands
+    /// `TimedOut` when it is next awaited (`wait` / `run`). v1 has no background
+    /// reaper, so a job that is never awaited is not force-expired — a full
+    /// job-owned deadline waits for the durability phase.
     pub deadline: Option<Duration>,
 }
 
