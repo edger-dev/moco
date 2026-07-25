@@ -31,6 +31,8 @@ pub enum DeniedReason {
     Decision,
     /// Nobody decided in time — the fail-closed default.
     NoApprover,
+    /// Its cwd did not resolve inside the node's allowed root.
+    CwdEscape,
 }
 
 /// The lifecycle state of a job.

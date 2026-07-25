@@ -228,3 +228,174 @@ fn spawn_failure_names_the_searched_path() {
     let rendered = err.to_string();
     assert!(rendered.contains("PATH searched"), "got {rendered}");
 }
+
+// ── regression tests for the Phase 3 review findings ───────────────────────
+
+/// A sink that always fails, to pin the audit-failure path.
+#[derive(Default)]
+struct FailingAuditLog;
+
+impl AuditSink for FailingAuditLog {
+    fn append(&self, _record: moco_job::AuditRecord) -> Result<(), JobError> {
+        Err(JobError::Audit("sink is down".into()))
+    }
+    fn records(&self) -> Result<Vec<moco_job::AuditRecord>, JobError> {
+        Ok(Vec::new())
+    }
+}
+
+/// An audit write failure must not be swallowed on a retry: marking the job
+/// audited before the write succeeded would turn one failure into permanent,
+/// silent history loss.
+#[test]
+fn failed_audit_write_is_not_silently_swallowed() {
+    let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FailingAuditLog));
+    let id = reg.start(JobRequest::new(["echo", "ok"], root())).unwrap();
+
+    let first = reg.wait(&id);
+    assert!(
+        first.is_err(),
+        "a failed audit write must fail the operation"
+    );
+
+    // The retry must fail the same way, not report a clean success for a job
+    // that was never recorded.
+    let second = reg.wait(&id);
+    assert!(
+        second.is_err(),
+        "a job with no record must not later report success"
+    );
+}
+
+/// Hostile argv values must round-trip through the durable log, and each record
+/// must stay exactly one line. A value with two or more newlines is rendered by
+/// Styx as a multi-line heredoc, which would otherwise split one record across
+/// several lines and make the whole history unreadable.
+#[test]
+fn hostile_argv_round_trips_as_one_line() {
+    let hostile = [
+        "",
+        "a b",
+        "@tag",
+        "{}",
+        "//x",
+        "a\"b",
+        "a\nb",
+        "a\nb\nc",
+        "{job 9, verdict @SeedAllow}",
+        "back\\slash",
+        "héllo→",
+    ];
+
+    for (i, value) in hostile.iter().enumerate() {
+        let path = std::env::temp_dir().join(format!(
+            "moco-audit-hostile-{}-{}.log",
+            std::process::id(),
+            i
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let rules = RuleSet::from_seed(SeedConfig {
+            allow: vec![vec!["echo".to_string(), (*value).to_string()]],
+            deny: vec![],
+        });
+        {
+            let reg = JobRegistry::with_policy(NodePolicy::new(rules, root()))
+                .with_audit(Arc::new(FileAuditLog::new(&path)));
+            reg.run(JobRequest::new(["echo", *value], root())).unwrap();
+        }
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "value {value:?} produced a multi-line record: {text:?}"
+        );
+
+        let records = FileAuditLog::new(&path).records().unwrap();
+        assert_eq!(records.len(), 1, "value {value:?} did not read back");
+        assert_eq!(
+            records[0].argv,
+            vec!["echo".to_string(), (*value).to_string()],
+            "value {value:?} did not survive the round trip"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Every status and verdict shape must survive the wire format, not just the
+/// two the happy-path tests happen to produce.
+#[test]
+fn all_status_and_verdict_shapes_round_trip() {
+    use moco_job::AuditRecord;
+
+    let statuses = [
+        JobStatus::Done { code: 0 },
+        JobStatus::Done { code: -1 },
+        JobStatus::Killed,
+        JobStatus::TimedOut,
+        JobStatus::Denied {
+            reason: DeniedReason::Rule,
+        },
+        JobStatus::Denied {
+            reason: DeniedReason::Decision,
+        },
+        JobStatus::Denied {
+            reason: DeniedReason::NoApprover,
+        },
+        JobStatus::Denied {
+            reason: DeniedReason::CwdEscape,
+        },
+    ];
+    let verdicts = [
+        Verdict::Ungoverned,
+        Verdict::SeedAllow,
+        Verdict::ApprovedOnce,
+        Verdict::SeedDeny,
+        Verdict::RejectedOnce,
+        Verdict::NoApprover,
+    ];
+
+    let path = std::env::temp_dir().join(format!("moco-audit-shapes-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let log = FileAuditLog::new(&path);
+
+    let mut expected = Vec::new();
+    for status in &statuses {
+        for verdict in &verdicts {
+            let rec = AuditRecord::new(1, argv(&["echo", "x"]), root(), *verdict, status.clone());
+            log.append(rec.clone()).unwrap();
+            expected.push(rec);
+        }
+    }
+
+    let back = log.records().unwrap();
+    assert_eq!(back.len(), expected.len());
+    for (got, want) in back.iter().zip(expected.iter()) {
+        assert_eq!(got.status, want.status);
+        assert_eq!(got.verdict, want.verdict);
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A killed job and a timed-out job are both recorded.
+#[test]
+fn killed_and_timed_out_jobs_are_audited() {
+    let reg = JobRegistry::ungoverned();
+
+    let killed = reg.start(JobRequest::new(["sleep", "10"], root())).unwrap();
+    reg.kill(&killed).unwrap();
+    reg.wait(&killed).unwrap();
+
+    let timed = reg
+        .start(JobRequest::new(["sleep", "10"], root()).with_deadline(Duration::from_millis(100)))
+        .unwrap();
+    reg.wait(&timed).unwrap();
+
+    let records = reg.audit().records().unwrap();
+    let statuses: Vec<_> = records.iter().map(|r| r.status.clone()).collect();
+    assert!(statuses.contains(&JobStatus::Killed), "got {statuses:?}");
+    assert!(statuses.contains(&JobStatus::TimedOut), "got {statuses:?}");
+}

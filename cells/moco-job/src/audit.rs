@@ -156,23 +156,105 @@ impl FileAuditLog {
     }
 }
 
+/// Escape a field so it can never contain a raw newline.
+///
+/// **Load-bearing for the file format.** Styx renders any string containing two
+/// or more newlines as a *heredoc*, which spans several lines — so an untrusted
+/// argv like `["echo", "a\nb\nc"]` would otherwise split one record across five
+/// lines and make the whole log unreadable (and, under a skip-tolerant reader,
+/// let a caller forge records). Escaping before serialization keeps every record
+/// exactly one line whatever the payload; `unescape_field` restores the value
+/// byte-for-byte, so fidelity is preserved.
+fn escape_field(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Reverse `escape_field`, left to right so `\\n` reads back as a literal
+/// backslash followed by `n`, not as a newline.
+fn unescape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+impl AuditRecord {
+    fn escaped(&self) -> Self {
+        Self {
+            job: self.job,
+            argv: self.argv.iter().map(|a| escape_field(a)).collect(),
+            cwd: escape_field(&self.cwd),
+            verdict: self.verdict,
+            status: self.status.clone(),
+            at_unix_ms: self.at_unix_ms,
+        }
+    }
+
+    fn unescaped(self) -> Self {
+        Self {
+            argv: self.argv.iter().map(|a| unescape_field(a)).collect(),
+            cwd: unescape_field(&self.cwd),
+            ..self
+        }
+    }
+}
+
 impl AuditSink for FileAuditLog {
     fn append(&self, record: AuditRecord) -> Result<(), JobError> {
         use std::io::Write;
 
-        let line = facet_styx::to_string_compact(&record)
+        let line = facet_styx::to_string_compact(&record.escaped())
             .map_err(|e| JobError::Audit(format!("failed to encode audit record: {e}")))?;
+        // Belt and braces: the escaping above should make this impossible, but a
+        // multi-line record would silently corrupt every later read, so refuse to
+        // write one rather than trust the encoder.
+        if line.contains('\n') {
+            return Err(JobError::Audit(
+                "refusing to write a multi-line audit record".into(),
+            ));
+        }
 
         let _guard = self
             .write_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut file = std::fs::File::options()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(JobError::Io)?;
-        writeln!(file, "{line}").map_err(JobError::Io)?;
+        let mut options = std::fs::File::options();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Owner-only from creation: the history must not be world-readable.
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path).map_err(JobError::Io)?;
+
+        // One write, not `writeln!`: `write_fmt` can issue the payload and the
+        // newline as separate syscalls, which lets a second process interleave
+        // between them. A single `write_all` under O_APPEND is atomic for a
+        // local regular file.
+        let mut buf = line.into_bytes();
+        buf.push(b'\n');
+        file.write_all(&buf).map_err(JobError::Io)?;
+        // Reach the disk, not just the page cache — this log is the durable
+        // history the whole design leans on.
+        file.sync_data().map_err(JobError::Io)?;
         Ok(())
     }
 
@@ -183,15 +265,20 @@ impl AuditSink for FileAuditLog {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(JobError::Io(e)),
         };
-        text.lines()
+        // Skip any line that does not parse rather than failing the whole read:
+        // a torn final line from a crash must not cost every prior record. This
+        // is only safe because `append` guarantees one record per line, so a
+        // caller cannot smuggle an extra line in through a payload.
+        Ok(text
+            .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| {
+            .filter_map(|line| {
                 // `to_string_compact` emits a braced expression (`{job 1, …}`),
                 // which is an expression rather than a document root — so it is
                 // read back with `from_str_expr`, not `from_str`.
-                facet_styx::from_str_expr(line)
-                    .map_err(|e| JobError::Audit(format!("failed to decode audit record: {e}")))
+                facet_styx::from_str_expr::<AuditRecord>(line).ok()
             })
-            .collect()
+            .map(AuditRecord::unescaped)
+            .collect())
     }
 }

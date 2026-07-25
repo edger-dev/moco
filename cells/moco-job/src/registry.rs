@@ -305,14 +305,18 @@ impl JobRegistry {
         if handle.audited {
             return Ok(());
         }
-        handle.audited = true;
+        // Append first: marking the job audited before the write succeeded would
+        // make a failed append permanent and silent — a later wait() would see
+        // the flag, return Ok, and the attempt would have no record at all.
         self.audit.append(AuditRecord::new(
             id.0,
             handle.argv.clone(),
             handle.resolved_cwd.clone(),
             handle.verdict,
             handle.status.clone(),
-        ))
+        ))?;
+        handle.audited = true;
+        Ok(())
     }
 
     /// The disposition this registry gives an argv.
@@ -377,7 +381,7 @@ impl JobRegistry {
         let id = JobId(inner.next_id);
         inner.next_id += 1;
 
-        let (capture, capture_write, capture_read) = Self::create_capture(&mut inner)?;
+        let (capture, capture_write, capture_read) = Self::create_capture(&mut inner, id.0)?;
 
         let request = JobRequest {
             argv: req.argv,
@@ -452,7 +456,7 @@ impl JobRegistry {
 
     /// Create a capture file inside this registry's private directory, opened
     /// with `create_new` so an existing path (a planted symlink) is refused.
-    fn create_capture(inner: &mut Inner) -> Result<(PathBuf, File, File), JobError> {
+    fn create_capture(inner: &mut Inner, job: u64) -> Result<(PathBuf, File, File), JobError> {
         let dir = match &inner.capture_dir {
             Some(dir) => dir.clone(),
             None => {
@@ -461,7 +465,7 @@ impl JobRegistry {
                 dir
             }
         };
-        let path = dir.join(format!("{}.log", inner.next_id));
+        let path = dir.join(format!("{job}.log"));
         let write = File::options()
             .create_new(true)
             .append(true)
@@ -505,6 +509,7 @@ impl JobRegistry {
             handle.status = JobStatus::Denied {
                 reason: DeniedReason::NoApprover,
             };
+            handle.verdict = Verdict::NoApprover;
             handle.pending = None;
             return self.record(id, handle);
         }
@@ -542,9 +547,14 @@ impl JobRegistry {
                 let cwd = match self.confined_cwd(&request.cwd) {
                     Ok(cwd) => cwd,
                     Err(e) => {
+                        // Terminal, so it needs both a verdict and a record —
+                        // otherwise the job's status and verdict disagree and
+                        // nothing is ever written.
                         handle.status = JobStatus::Denied {
-                            reason: DeniedReason::Rule,
+                            reason: DeniedReason::CwdEscape,
                         };
+                        handle.verdict = Verdict::SeedDeny;
+                        let _ = self.record(id, handle);
                         return Err(e);
                     }
                 };
@@ -662,7 +672,6 @@ impl JobRegistry {
                     {
                         handle.status = JobStatus::TimedOut;
                         if let Some(child) = handle.child.take() {
-                            self.record(id, handle)?;
                             expired = Some((child, outcome_of(handle)));
                         }
                     }
@@ -670,8 +679,15 @@ impl JobRegistry {
             }
 
             if let Some((mut child, outcome)) = expired {
+                // Reap before recording: if the audit write fails we must not
+                // drop the child un-reaped (its handle is already out of the
+                // registry, so nothing else would ever collect it).
                 let _ = child.kill();
                 let _ = child.wait();
+                let mut inner = self.locked();
+                if let Some(handle) = inner.jobs.get_mut(id) {
+                    self.record(id, handle)?;
+                }
                 return Ok(outcome);
             }
             std::thread::sleep(POLL);
@@ -713,5 +729,63 @@ impl JobRegistry {
     pub fn run(&self, req: JobRequest) -> Result<Outcome, JobError> {
         let id = self.start(req)?;
         self.wait(&id)
+    }
+}
+
+impl Drop for JobRegistry {
+    /// Flush a record for every job that never reached a caller.
+    ///
+    /// Recording otherwise happens when a job is awaited, so a job that is
+    /// started and abandoned — completed, killed, or still running at shutdown —
+    /// would leave no history at all. "Every attempt is durable history" cannot
+    /// depend on someone calling `wait`.
+    ///
+    /// v1 has no background reaper, so this lands at shutdown rather than at the
+    /// moment the child exits; a reaper thread is the real answer.
+    ///
+    /// implements: audit-every-attempt
+    fn drop(&mut self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let ids: Vec<JobId> = inner
+            .jobs
+            .iter()
+            .filter(|(_, handle)| !handle.audited)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in ids {
+            let Some(handle) = inner.jobs.get_mut(&id) else {
+                continue;
+            };
+            if !handle.status.is_terminal() {
+                // Resolve the honest terminal state: a real exit code if the
+                // child finished on its own, otherwise it dies with us.
+                handle.status = match handle
+                    .child
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok())
+                    .flatten()
+                {
+                    Some(exit) if !handle.killed => JobStatus::Done {
+                        code: exit.code().unwrap_or(-1),
+                    },
+                    _ => JobStatus::Killed,
+                };
+            }
+            let record = AuditRecord::new(
+                id.0,
+                handle.argv.clone(),
+                handle.resolved_cwd.clone(),
+                handle.verdict,
+                handle.status.clone(),
+            );
+            if self.audit.append(record).is_ok() {
+                handle.audited = true;
+            }
+        }
     }
 }
