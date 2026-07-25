@@ -29,6 +29,7 @@ pub struct ShellProcess {
 }
 
 impl ShellProcess {
+    #[allow(clippy::unwrap_used)] // jig::rust::no-unwrap-in-lib: Mutex::lock() poison is unrecoverable by design
     pub fn spawn(command: &str, args: &[&str]) -> Result<Self, TtyError> {
         let pty = openpty(None, None).map_err(TtyError::PtyAllocation)?;
 
@@ -59,7 +60,7 @@ impl ShellProcess {
                 }
 
                 let c_command =
-                    CString::new(command).unwrap_or_else(|_| CString::new("sh").unwrap());
+                    CString::new(command).unwrap_or_else(|_| c"sh".to_owned());
                 let mut c_args: Vec<CString> = vec![c_command.clone()];
                 for arg in args {
                     if let Ok(a) = CString::new(*arg) {
@@ -105,10 +106,10 @@ impl ShellProcess {
                                 }
 
                                 let chunk = IoChunk::new(IoDirection::Stdout, data);
-                                if let Ok(cb) = callback_clone.lock() {
-                                    if let Some(ref f) = *cb {
-                                        f(chunk);
-                                    }
+                                if let Ok(cb) = callback_clone.lock()
+                                    && let Some(ref f) = *cb
+                                {
+                                    f(chunk);
                                 }
                             }
                             Err(_) => break,
@@ -116,13 +117,11 @@ impl ShellProcess {
                     }
 
                     // Reader ended — check child status
-                    if let Ok(wait_result) =
+                    if let Ok(nix::sys::wait::WaitStatus::Exited(_, code)) =
                         waitpid(child_pid, Some(WaitPidFlag::WNOHANG))
                     {
-                        if let nix::sys::wait::WaitStatus::Exited(_, code) = wait_result {
-                            let mut s = status_clone.lock().unwrap();
-                            *s = ProcessStatus::Exited(code);
-                        }
+                        let mut s = status_clone.lock().unwrap();
+                        *s = ProcessStatus::Exited(code);
                     }
                 });
 
@@ -142,13 +141,14 @@ impl ShellProcess {
         self.child_pid.as_raw() as ProcessId
     }
 
+    #[allow(clippy::unwrap_used)] // jig::rust::no-unwrap-in-lib: Mutex::lock() poison is unrecoverable by design
     pub fn status(&self) -> ProcessStatus {
         // Try non-blocking waitpid to update status
-        if let Ok(wait_result) = waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
-            if let nix::sys::wait::WaitStatus::Exited(_, code) = wait_result {
-                let mut s = self.status.lock().unwrap();
-                *s = ProcessStatus::Exited(code);
-            }
+        if let Ok(nix::sys::wait::WaitStatus::Exited(_, code)) =
+            waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG))
+        {
+            let mut s = self.status.lock().unwrap();
+            *s = ProcessStatus::Exited(code);
         }
         *self.status.lock().unwrap()
     }
@@ -160,15 +160,16 @@ impl ShellProcess {
         file.flush().map_err(TtyError::Io)?;
 
         let chunk = IoChunk::new(IoDirection::Stdin, data.to_vec());
-        if let Ok(cb) = self.callback.lock() {
-            if let Some(ref f) = *cb {
-                f(chunk);
-            }
+        if let Ok(cb) = self.callback.lock()
+            && let Some(ref f) = *cb
+        {
+            f(chunk);
         }
 
         Ok(())
     }
 
+    #[allow(clippy::unwrap_used)] // jig::rust::no-unwrap-in-lib: Mutex::lock() poison is unrecoverable by design
     pub fn read_stdout(&self) -> Vec<u8> {
         let mut buffer = self.output_buffer.lock().unwrap();
         let data = buffer.clone();
@@ -176,11 +177,13 @@ impl ShellProcess {
         data
     }
 
+    #[allow(clippy::unwrap_used)] // jig::rust::no-unwrap-in-lib: Mutex::lock() poison is unrecoverable by design
     pub fn set_callback(&self, callback: IoCallback) {
         let mut cb = self.callback.lock().unwrap();
         *cb = Some(callback);
     }
 
+    #[allow(clippy::unwrap_used)] // jig::rust::no-unwrap-in-lib: Mutex::lock() poison is unrecoverable by design
     pub fn stop(&mut self) -> Result<ProcessStatus, TtyError> {
         // Check if already exited
         if let ProcessStatus::Exited(code) = self.status() {

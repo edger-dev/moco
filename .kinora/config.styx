@@ -3,4 +3,5 @@ roots {
   specs { policy "never" }
   tasks { policy "never" }
   inbox { policy "never" }
+  rules { policy "never" }
 }

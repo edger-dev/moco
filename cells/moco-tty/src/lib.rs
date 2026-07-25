@@ -1,3 +1,9 @@
+// moco-tty is the native TTY cell: it wraps libc/PTY syscalls (fork, dup2,
+// execvp, from_raw_fd). unsafe is inherent to this crate, so the workspace
+// `unsafe_code = "deny"` is relaxed here; each `unsafe` block is local to
+// process.rs and paired with a safety comment.
+#![allow(unsafe_code)]
+
 pub mod error;
 pub mod io;
 pub mod process;
@@ -142,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_callback_forwarding() {
-        let chunks: Arc<Mutex<Vec<(IoDirection, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let chunks = Arc::new(Mutex::new(Vec::new()));
         let chunks_clone = Arc::clone(&chunks);
 
         let proc = ShellProcess::spawn("cat", &[]).expect("spawn failed");

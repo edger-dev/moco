@@ -64,11 +64,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1782728046,
-        "narHash": "sha256-ZwLw4n9X0pm75E48YYajW3WfkHTb8iqOt23TfmuIT1M=",
+        "lastModified": 1782919835,
+        "narHash": "sha256-6PkSYLh+ZwSrBjXyCxwVs/zVzsoetwUAVKDdU+q/wcY=",
         "owner": "edger-dev",
         "repo": "jig",
-        "rev": "436c7c839bb8ffd7ff5dcfd5010b6f5ec5141c49",
+        "rev": "e574e1606a96a9d674de4d56835b9773d0566b7e",
         "type": "github"
       },
       "original": {

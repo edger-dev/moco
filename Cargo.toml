@@ -16,6 +16,25 @@ homepage = "https://moco.edger.dev"
 repository = "https://github.com/edger-dev/moco"
 authors = ["YJ Park <yjpark@gmail.com>"]
 
+[workspace.lints.rust]
+# rule: (rung 2) unsafe is denied by default. "deny" rather than the jig
+# template's "forbid" so the native FFI cell (moco-tty, which wraps libc/PTY
+# syscalls) can carry a justified crate-level `#![allow(unsafe_code)]`; forbid
+# cannot be locally overridden.
+unsafe_code = "deny"
+
+# Lint rules live in the kinora `rules` root (see templates/rust/rules/ in jig).
+# Each line below is a rung-1 rule projected into clippy config; the `# rule:`
+# tag cites the rule kino it enforces. Promote a line to "deny" to graduate it to
+# rung 2. See the "Lint Rules" section of CLAUDE.md.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"            # rule: jig::rust::no-unwrap-in-lib
+expect_used = "warn"            # rule: jig::rust::no-unwrap-in-lib
+todo = "warn"                   # rule: jig::rust::no-todo-committed
+unimplemented = "warn"          # rule: jig::rust::no-todo-committed
+dbg_macro = "warn"              # rule: jig::rust::no-todo-committed
+
 [workspace.dependencies]
 
 # Crates

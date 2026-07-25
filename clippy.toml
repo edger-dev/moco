@@ -1,0 +1,8 @@
+# clippy configuration for the rust jig.
+#
+# The restriction lints enabled in Cargo.toml's [workspace.lints.clippy]
+# (unwrap_used, expect_used) are exempted in test code — the rules that own them
+# (jig::rust::no-unwrap-in-lib) apply to library/non-test code only.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true

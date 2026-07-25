@@ -121,6 +121,44 @@ Write tests **before** implementation. The sequence:
 2. Run `cargo test --workspace` — confirm tests fail for the right reasons (not compilation errors from missing types, but assertion failures or missing functionality)
 3. Implement the minimum code to make tests pass
 4. Verify all tests pass (not just the new ones)
+
+## Lint Rules
+
+This project encodes coding rules as **lint rules** so the toolchain — not your
+memory — enforces them. Each rule is a kino in the `rules` root of the kinora
+ledger (`kinora resolve "jig::rust::no-unwrap-in-lib"` prints one). A rule sits
+on a **graduation ladder**, and the point of the ladder is that most rules cost
+you *zero* context:
+
+- **rung 0 · prose** — a rule no mechanism yet catches. These are the only rules
+  you must actively keep in mind — read `.kinora/rung0-hints.md`, the generated
+  digest of exactly the rung-0 set (regenerate with `gen-rung0-digest.sh` after
+  rules change; it shrinks as rules graduate).
+- **rung 1 · warn** — enforced by clippy config or an architectural test. You do
+  **not** memorize these. A violation shows up *after* you write it:
+  - clippy rules → in `.bacon-claude-diagnostics` (already part of your loop).
+  - architectural tests → as a red `cargo test` (e.g. `tests/architecture.rs`).
+  Because zero warnings is the commit standard, a rung-1 warning blocks the
+  commit just like an error — fix it before committing.
+- **rung 2 · deny** — a compile failure; you cannot proceed until it's fixed.
+- **rung 3 · structural** — the wrong code doesn't compile at all (types).
+
+So: **write code, let the mechanism catch violations, read the diagnostic, fix
+it.** Don't try to hold the whole rulebook in context — that's the failure mode
+this design exists to remove.
+
+**When a rule fires,** its message names the rule (e.g. `rule
+jig::rust::prefer-file-modules`). Read that rule kino for the rationale and the
+escape hatch. Every enforcement point cites its rule: clippy lines carry a
+`# rule:` comment in `Cargo.toml`, tests carry `implements: <rule-name>`.
+
+**Escape hatches** are per-rule and local: a justified `#[allow(...)]` on the
+line, or a test carve-out. The rule stays in force; the exception is visible.
+
+**Adding or graduating a rule:** author/re-version the rule kino (follow
+`jig::meta::rule-schema`), wire its mechanism (a `[workspace.lints]` line or a
+test), and cite the rule from that enforcement point. Mechanized rules default
+to rung 1 (warn); promote to `deny` deliberately once a rule has proven clean.
 <!-- /jig:rust -->
 
 <!-- jig:kinora -->

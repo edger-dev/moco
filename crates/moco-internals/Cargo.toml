@@ -8,6 +8,9 @@ homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 facet = "0.43.2"
 facet-styx = "1.0.1"
