@@ -15,22 +15,43 @@ impl fmt::Display for JobId {
     }
 }
 
-/// The lifecycle state of a job. v1 substrate states only; the governance
-/// states (`pending-approval`, `denied`) arrive in Phase 2.
+/// Why a job was denied.
+///
+/// implements: approval-is-a-job-state
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeniedReason {
+    /// A deny rule matched this exact argv.
+    Rule,
+    /// A human decided against it.
+    Decision,
+    /// Nobody decided in time — the fail-closed default.
+    NoApprover,
+}
+
+/// The lifecycle state of a job.
+///
+/// Approval is modeled as job *states*, not a side feature:
+/// `pending-approval → running → done | denied | killed | timed-out`.
 ///
 /// implements: job-is-the-unit-not-rpc
+/// implements: approval-is-a-job-state
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobStatus {
+    /// Registered but not spawned: awaiting a human decision.
+    PendingApproval,
     Running,
     Done { code: i32 },
     Killed,
     TimedOut,
+    /// Never ran, and never will.
+    Denied(DeniedReason),
 }
 
 impl JobStatus {
-    /// A terminal state is any state the job will not leave.
+    /// A terminal state is any state the job will not leave. A pending job is
+    /// *not* terminal — it is waiting on a decision.
     pub fn is_terminal(&self) -> bool {
-        !matches!(self, JobStatus::Running)
+        !matches!(self, JobStatus::Running | JobStatus::PendingApproval)
     }
 }
 

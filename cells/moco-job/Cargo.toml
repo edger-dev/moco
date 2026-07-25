@@ -13,3 +13,5 @@ workspace = true
 
 [dependencies]
 moco-core = { workspace = true }
+facet = { workspace = true }
+facet-styx = { workspace = true }

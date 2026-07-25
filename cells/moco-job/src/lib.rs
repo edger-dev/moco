@@ -9,11 +9,15 @@
 
 pub mod error;
 pub mod job;
+pub mod preflight;
 pub mod registry;
+pub mod rules;
 
 pub use error::JobError;
-pub use job::{JobId, JobRequest, JobStatus, Outcome, Tail};
+pub use job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
+pub use preflight::Preflight;
 pub use registry::JobRegistry;
+pub use rules::{Decision, Disposition, NodePolicy, RuleSet, SeedConfig};
 
 use moco_core::{Cell, CellSpec, Func, FuncSpec};
 
@@ -76,5 +80,25 @@ impl Func for RunJob {
         name: "run",
         title: "Run Job",
         description: "Blocking sugar over start + wait, for quick commands",
+    };
+}
+
+pub struct PreflightJob;
+
+impl Func for PreflightJob {
+    const SPEC: &'static FuncSpec = &FuncSpec {
+        name: "preflight",
+        title: "Preflight Command",
+        description: "Read-only: resolve the disposition, program, PATH and confined cwd a run would get",
+    };
+}
+
+pub struct DecideJob;
+
+impl Func for DecideJob {
+    const SPEC: &'static FuncSpec = &FuncSpec {
+        name: "decide",
+        title: "Decide Pending Job",
+        description: "Approve (optionally with a corrected argv) or reject a job awaiting approval",
     };
 }

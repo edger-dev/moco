@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::JobError;
 use crate::job::{JobId, JobRequest, JobStatus, Outcome, Tail};
+use crate::preflight::Preflight;
+use crate::rules::{Decision, NodePolicy};
 
 /// How often `wait` polls a running child for exit / deadline.
 const POLL: Duration = Duration::from_millis(10);
@@ -16,6 +18,17 @@ const POLL: Duration = Duration::from_millis(10);
 /// within its registry, so it cannot name the file — two registries in one
 /// process would collide on `job 0`. This never resets.
 static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Scaffold placeholder: the real resolution lands with the implementation.
+fn unimplemented_preflight() -> Preflight {
+    Preflight {
+        disposition: crate::rules::Disposition::NeedsApproval,
+        program: None,
+        effective_path: String::new(),
+        resolved_cwd: None,
+        cwd_error: Some("not implemented".into()),
+    }
+}
 
 /// The live bookkeeping for one job.
 struct JobHandle {
@@ -65,11 +78,47 @@ impl Drop for JobHandle {
 #[derive(Default)]
 pub struct JobRegistry {
     inner: Mutex<Inner>,
+    /// The node's governance. `None` means an ungoverned registry: a trusted
+    /// local caller (e.g. supervised dev processes) runs without a gate. When
+    /// set, every `start` passes the gate first, and an argv matching no rule
+    /// fails closed.
+    policy: Option<NodePolicy>,
 }
 
 impl JobRegistry {
+    /// An ungoverned registry — the bare substrate, for a trusted local caller.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A registry governed by `policy`: every `start` is gated before it spawns.
+    ///
+    /// implements: governed-command-is-a-job
+    pub fn with_policy(policy: NodePolicy) -> Self {
+        Self {
+            inner: Mutex::new(Inner::default()),
+            policy: Some(policy),
+        }
+    }
+
+    /// The node's rule-set, for read-only introspection.
+    pub fn policy(&self) -> Option<&NodePolicy> {
+        self.policy.as_ref()
+    }
+
+    /// Resolve what a real run *would* do — without queuing or running anything.
+    ///
+    /// implements: agent-self-sufficiency
+    pub fn preflight(&self, _argv: &[String], _cwd: &std::path::Path) -> Preflight {
+        unimplemented_preflight()
+    }
+
+    /// Record a human's decision on a job awaiting approval, transitioning it to
+    /// `running` (spawning it, with any corrected argv) or `denied`.
+    ///
+    /// implements: approval-is-a-job-state
+    pub fn decide(&self, _id: &JobId, _decision: Decision) -> Result<(), JobError> {
+        Err(JobError::NotImplemented)
     }
 
     /// Lock the inner state, recovering the guard if a holder panicked (a

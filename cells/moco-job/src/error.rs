@@ -14,6 +14,14 @@ pub enum JobError {
     },
     /// No job with this id is registered.
     NotFound(JobId),
+    /// The job's cwd does not resolve inside the node's allowed root.
+    CwdEscape { cwd: String, root: String },
+    /// A decision was offered for a job that is not awaiting one.
+    NotPending(JobId),
+    /// The node's committed rule seed could not be parsed.
+    Seed(String),
+    /// The operation is scaffolded but not yet implemented.
+    NotImplemented,
     /// An I/O error handling a job's file-backed output.
     Io(std::io::Error),
 }
@@ -26,6 +34,12 @@ impl fmt::Display for JobError {
                 write!(f, "failed to spawn '{program}': {source}")
             }
             JobError::NotFound(id) => write!(f, "no such job: {id}"),
+            JobError::CwdEscape { cwd, root } => {
+                write!(f, "cwd '{cwd}' does not resolve inside allowed root '{root}'")
+            }
+            JobError::NotPending(id) => write!(f, "job is not awaiting approval: {id}"),
+            JobError::Seed(msg) => write!(f, "{msg}"),
+            JobError::NotImplemented => write!(f, "not implemented"),
             JobError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
