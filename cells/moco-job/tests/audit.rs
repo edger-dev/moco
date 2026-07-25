@@ -364,7 +364,14 @@ fn all_status_and_verdict_shapes_round_trip() {
     let mut expected = Vec::new();
     for status in &statuses {
         for verdict in &verdicts {
-            let rec = AuditRecord::new(1, argv(&["echo", "x"]), root(), *verdict, status.clone());
+            let rec = AuditRecord::new(
+                "test-registry",
+                1,
+                argv(&["echo", "x"]),
+                root(),
+                *verdict,
+                status.clone(),
+            );
             log.append(rec.clone()).unwrap();
             expected.push(rec);
         }
@@ -398,4 +405,83 @@ fn killed_and_timed_out_jobs_are_audited() {
     let statuses: Vec<_> = records.iter().map(|r| r.status.clone()).collect();
     assert!(statuses.contains(&JobStatus::Killed), "got {statuses:?}");
     assert!(statuses.contains(&JobStatus::TimedOut), "got {statuses:?}");
+}
+
+/// An attempt rejected before it could become a job — a probe at the
+/// confinement boundary — is still recorded.
+#[test]
+fn cwd_escape_attempt_is_recorded() {
+    let reg = governed();
+    let err = reg.start(JobRequest::new(["echo", "ok"], "/")).unwrap_err();
+    assert!(matches!(err, JobError::CwdEscape { .. }), "got {err:?}");
+
+    let records = reg.audit().records().unwrap();
+    assert_eq!(records.len(), 1, "a rejected attempt must still be history");
+    assert_eq!(
+        records[0].status,
+        JobStatus::Denied {
+            reason: DeniedReason::CwdEscape
+        }
+    );
+}
+
+/// A permitted attempt that cannot be started is recorded as Failed, since the
+/// caller never gets an id to await.
+#[test]
+fn unstartable_attempt_is_recorded_as_failed() {
+    let reg = JobRegistry::ungoverned();
+    let err = reg
+        .start(JobRequest::new(
+            ["definitely-not-a-real-program-xyz"],
+            root(),
+        ))
+        .unwrap_err();
+    assert!(matches!(err, JobError::Spawn { .. }), "got {err:?}");
+
+    let records = reg.audit().records().unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(
+        matches!(records[0].status, JobStatus::Failed { .. }),
+        "got {:?}",
+        records[0].status
+    );
+}
+
+/// Records carry a registry identity, so two registries sharing one log file
+/// do not both claim job 0.
+#[test]
+fn records_identify_their_registry() {
+    let path = std::env::temp_dir().join(format!("moco-audit-reg-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    for _ in 0..2 {
+        let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FileAuditLog::new(&path)));
+        reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
+    }
+
+    let records = FileAuditLog::new(&path).records().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].job, records[1].job, "both are job 0 locally");
+    assert_ne!(
+        records[0].registry, records[1].registry,
+        "but they must be distinguishable"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `records_since` returns only the tail, so polling a growing log is cheap.
+#[test]
+fn records_since_returns_only_the_tail() {
+    let reg = governed();
+    reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
+    let seen = reg.audit().records().unwrap().len();
+
+    reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
+    reg.start(JobRequest::new(["echo", "nope"], root()))
+        .unwrap();
+
+    let tail = reg.audit().records_since(seen).unwrap();
+    assert_eq!(tail.len(), 2, "only the records added since");
+    assert_eq!(tail[1].verdict, Verdict::SeedDeny);
 }

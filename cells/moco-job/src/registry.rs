@@ -19,6 +19,19 @@ const POLL: Duration = Duration::from_millis(10);
 /// Process-global sequence, used to name the per-registry capture directory.
 static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Process-global sequence identifying each registry instance, so records from
+/// two registries sharing one log file can be told apart.
+static REGISTRY_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A registry identity that is unique for this host between pid reuse.
+fn new_registry_id() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        REGISTRY_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// The live bookkeeping for one job.
 struct JobHandle {
     /// The running child, taken once the job reaches a terminal state.
@@ -119,6 +132,9 @@ fn make_capture_dir() -> Result<PathBuf, JobError> {
 /// Note this is the *starting* directory only — a spawned process may `chdir`
 /// elsewhere. The rule-set, not the cwd, is the real containment.
 ///
+/// Marker distinguishing a non-UTF-8 cwd from a containment failure.
+const NOT_UTF8: &str = "__moco_cwd_not_utf8__";
+
 /// implements: argv-not-shell (the cwd-confinement half)
 fn confine(cwd: &Path, root: &Path) -> Result<PathBuf, String> {
     let root = root
@@ -129,6 +145,11 @@ fn confine(cwd: &Path, root: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("cwd '{}' does not resolve: {e}", cwd.display()))?;
     // `Path::starts_with` compares whole components, so `/tmp/foobar` is NOT
     // inside `/tmp/foo`. Do not replace this with a string prefix test.
+    if resolved.to_str().is_none() {
+        // Guaranteed here so an audit record can name the directory exactly;
+        // see JobError::CwdNotUtf8.
+        return Err(NOT_UTF8.to_string());
+    }
     if resolved.starts_with(&root) {
         Ok(resolved)
     } else {
@@ -238,6 +259,8 @@ pub struct JobRegistry {
     /// Where terminal records are appended. Always present, so every registry
     /// has a history even when no durable sink was configured.
     audit: Arc<dyn AuditSink>,
+    /// This registry's identity, stamped on every record it writes.
+    registry_id: String,
 }
 
 impl JobRegistry {
@@ -248,6 +271,7 @@ impl JobRegistry {
             inner: Mutex::new(Inner::default()),
             policy: None,
             audit: Arc::new(MemoryAuditLog::new()),
+            registry_id: new_registry_id(),
         }
     }
 
@@ -259,6 +283,7 @@ impl JobRegistry {
             inner: Mutex::new(Inner::default()),
             policy: Some(policy),
             audit: Arc::new(MemoryAuditLog::new()),
+            registry_id: new_registry_id(),
         }
     }
 
@@ -302,21 +327,71 @@ impl JobRegistry {
     ///
     /// implements: audit-every-attempt
     fn record(&self, id: &JobId, handle: &mut JobHandle) -> Result<(), JobError> {
-        if handle.audited {
-            return Ok(());
+        match self.claim(id, handle) {
+            Some(record) => self.flush(id, record),
+            None => Ok(()),
         }
-        // Append first: marking the job audited before the write succeeded would
-        // make a failed append permanent and silent — a later wait() would see
-        // the flag, return Ok, and the attempt would have no record at all.
-        self.audit.append(AuditRecord::new(
+    }
+
+    /// Claim the right to write this job's record, returning what to write.
+    ///
+    /// Pure bookkeeping — no I/O, so it is safe to call under the registry lock.
+    /// Returns `None` if the record is already written or already claimed.
+    fn claim(&self, id: &JobId, handle: &mut JobHandle) -> Option<AuditRecord> {
+        if handle.audited {
+            return None;
+        }
+        handle.audited = true;
+        Some(AuditRecord::new(
+            self.registry_id.clone(),
             id.0,
             handle.argv.clone(),
             handle.resolved_cwd.clone(),
             handle.verdict,
             handle.status.clone(),
-        ))?;
-        handle.audited = true;
-        Ok(())
+        ))
+    }
+
+    /// Write a claimed record. **Call with the registry lock released**: a sink
+    /// can block on a hung filesystem, and holding the lock across that would
+    /// freeze every other job's start/tail/wait/kill.
+    ///
+    /// On failure the claim is released, so the attempt can be recorded on a
+    /// later call rather than being lost silently.
+    fn flush(&self, id: &JobId, record: AuditRecord) -> Result<(), JobError> {
+        match self.audit.append(record) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Some(handle) = self.locked().jobs.get_mut(id) {
+                    handle.audited = false;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Record an attempt that was rejected before it could become a job.
+    ///
+    /// It has no `JobHandle` and never will, so it is appended directly. Best
+    /// effort: the caller is already returning the rejection error, and losing
+    /// that error to an audit failure would be worse than the missing line.
+    ///
+    /// implements: audit-every-attempt
+    fn record_rejected(&self, argv: &[String], cwd: &Path, verdict: Verdict, status: JobStatus) {
+        let job = {
+            let mut inner = self.locked();
+            let job = inner.next_id;
+            inner.next_id += 1;
+            job
+        };
+        let _ = self.audit.append(AuditRecord::new(
+            self.registry_id.clone(),
+            job,
+            argv.to_vec(),
+            cwd.to_path_buf(),
+            verdict,
+            status,
+        ));
     }
 
     /// The disposition this registry gives an argv.
@@ -373,8 +448,23 @@ impl JobRegistry {
         }
 
         // Confine the cwd before anything else: a request that cannot name a
-        // legal working directory never becomes a job.
-        let cwd = self.confined_cwd(&req.cwd)?;
+        // legal working directory never becomes a job. It is still an attempt,
+        // so it is recorded — a probe at the confinement boundary is exactly the
+        // kind of event the audit exists for.
+        let cwd = match self.confined_cwd(&req.cwd) {
+            Ok(cwd) => cwd,
+            Err(e) => {
+                self.record_rejected(
+                    &req.argv,
+                    &req.cwd,
+                    Verdict::SeedDeny,
+                    JobStatus::Denied {
+                        reason: DeniedReason::CwdEscape,
+                    },
+                );
+                return Err(e);
+            }
+        };
         let disposition = self.disposition(&req.argv);
 
         let mut inner = self.locked();
@@ -414,13 +504,22 @@ impl JobRegistry {
 
         match disposition {
             Disposition::Allow => {
-                handle.child = Some(spawn_child(
-                    &request.argv,
-                    &request.cwd,
-                    &handle.capture_write,
-                )?);
-                handle.status = JobStatus::Running;
-                handle.started = Instant::now();
+                match spawn_child(&request.argv, &request.cwd, &handle.capture_write) {
+                    Ok(child) => {
+                        handle.child = Some(child);
+                        handle.status = JobStatus::Running;
+                        handle.started = Instant::now();
+                    }
+                    Err(e) => {
+                        // Permitted but unstartable — still an attempt, and the
+                        // caller gets no id, so record it here or never.
+                        handle.status = JobStatus::Failed {
+                            error: e.to_string(),
+                        };
+                        let _ = self.record(&id, &mut handle);
+                        return Err(e);
+                    }
+                }
             }
             Disposition::Deny => {
                 handle.status = JobStatus::Denied {
@@ -446,9 +545,20 @@ impl JobRegistry {
     /// Resolve a request's cwd under the node's confinement, if any.
     fn confined_cwd(&self, cwd: &Path) -> Result<PathBuf, JobError> {
         match &self.policy {
-            Some(policy) => confine(cwd, &policy.allowed_root).map_err(|_| JobError::CwdEscape {
+            Some(policy) => confine(cwd, &policy.allowed_root).map_err(|e| {
+                if e == NOT_UTF8 {
+                    JobError::CwdNotUtf8 {
+                        cwd: cwd.display().to_string(),
+                    }
+                } else {
+                    JobError::CwdEscape {
+                        cwd: cwd.display().to_string(),
+                        root: policy.allowed_root.display().to_string(),
+                    }
+                }
+            }),
+            None if cwd.to_str().is_none() => Err(JobError::CwdNotUtf8 {
                 cwd: cwd.display().to_string(),
-                root: policy.allowed_root.display().to_string(),
             }),
             None => Ok(cwd.to_path_buf()),
         }
@@ -624,6 +734,7 @@ impl JobRegistry {
             // A child taken out under the lock and reaped after releasing it:
             // never block the whole registry on another process exiting.
             let mut expired: Option<(Child, Outcome)> = None;
+            let mut settled: Option<(Outcome, Option<AuditRecord>)> = None;
             {
                 let mut inner = self.locked();
                 let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
@@ -633,8 +744,7 @@ impl JobRegistry {
                     .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
                 if handle.status.is_terminal() {
-                    self.record(id, handle)?;
-                    return Ok(outcome_of(handle));
+                    settled = Some((outcome_of(handle), self.claim(id, handle)));
                 }
 
                 // Fail closed: nobody decided in time.
@@ -645,11 +755,8 @@ impl JobRegistry {
                         reason: DeniedReason::NoApprover,
                     };
                     handle.pending = None;
-                    self.record(id, handle)?;
-                    return Ok(outcome_of(handle));
-                }
-
-                if let Some(child) = handle.child.as_mut() {
+                    settled = Some((outcome_of(handle), self.claim(id, handle)));
+                } else if let Some(child) = handle.child.as_mut() {
                     // Check for a real exit first: a job that finished on its own
                     // reports its true outcome even if it also crossed its
                     // deadline in the same tick.
@@ -662,11 +769,8 @@ impl JobRegistry {
                             }
                         };
                         handle.child = None;
-                        self.record(id, handle)?;
-                        return Ok(outcome_of(handle));
-                    }
-
-                    if handle
+                        settled = Some((outcome_of(handle), self.claim(id, handle)));
+                    } else if handle
                         .deadline
                         .is_some_and(|dl| handle.started.elapsed() >= dl)
                     {
@@ -678,15 +782,25 @@ impl JobRegistry {
                 }
             }
 
+            if let Some((outcome, record)) = settled {
+                if let Some(record) = record {
+                    self.flush(id, record)?;
+                }
+                return Ok(outcome);
+            }
+
             if let Some((mut child, outcome)) = expired {
                 // Reap before recording: if the audit write fails we must not
                 // drop the child un-reaped (its handle is already out of the
                 // registry, so nothing else would ever collect it).
                 let _ = child.kill();
                 let _ = child.wait();
-                let mut inner = self.locked();
-                if let Some(handle) = inner.jobs.get_mut(id) {
-                    self.record(id, handle)?;
+                let claimed = {
+                    let mut inner = self.locked();
+                    inner.jobs.get_mut(id).and_then(|h| self.claim(id, h))
+                };
+                if let Some(record) = claimed {
+                    self.flush(id, record)?;
                 }
                 return Ok(outcome);
             }
@@ -777,6 +891,7 @@ impl Drop for JobRegistry {
                 };
             }
             let record = AuditRecord::new(
+                self.registry_id.clone(),
                 id.0,
                 handle.argv.clone(),
                 handle.resolved_cwd.clone(),

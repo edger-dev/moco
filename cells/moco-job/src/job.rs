@@ -53,6 +53,10 @@ pub enum JobStatus {
     },
     Killed,
     TimedOut,
+    /// Permitted, but it could not be started at all.
+    Failed {
+        error: String,
+    },
     /// Never ran, and never will.
     ///
     /// A struct variant, not a tuple one: a tuple variant wrapping another enum

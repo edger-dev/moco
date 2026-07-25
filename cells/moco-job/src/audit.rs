@@ -47,6 +47,11 @@ impl Verdict {
 /// implements: audit-every-attempt
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct AuditRecord {
+    /// Which registry instance produced this record. A `job` id is only unique
+    /// within its registry (each counts from 0), so a shared log needs this to
+    /// tell two registries' job 0 apart. Process-id plus a per-process sequence,
+    /// so it is unique for the life of a host between pid reuse.
+    pub registry: String,
     /// The registry-local job id.
     pub job: u64,
     /// Exactly the argv that ran (or would have run) — never a shell string, so
@@ -64,6 +69,7 @@ pub struct AuditRecord {
 
 impl AuditRecord {
     pub fn new(
+        registry: impl Into<String>,
         job: u64,
         argv: Vec<String>,
         cwd: PathBuf,
@@ -71,9 +77,13 @@ impl AuditRecord {
         status: JobStatus,
     ) -> Self {
         Self {
+            registry: registry.into(),
             job,
             argv,
-            cwd: cwd.display().to_string(),
+            // Lossless: a job's cwd is validated as UTF-8 when it is confined,
+            // so this never silently substitutes replacement characters for a
+            // path the record then names wrongly.
+            cwd: cwd.to_str().unwrap_or_default().to_string(),
             verdict,
             status,
             at_unix_ms: SystemTime::now()
@@ -100,6 +110,14 @@ pub trait AuditSink: Send + Sync {
     ///
     /// implements: agent-self-sufficiency
     fn records(&self) -> Result<Vec<AuditRecord>, JobError>;
+
+    /// Read only the records after the first `skip`, so a caller polling a log
+    /// that only ever grows does not re-read all of it each time.
+    ///
+    /// implements: agent-self-sufficiency
+    fn records_since(&self, skip: usize) -> Result<Vec<AuditRecord>, JobError> {
+        Ok(self.records()?.into_iter().skip(skip).collect())
+    }
 }
 
 /// An in-process audit log. The default sink: always present, so every registry
@@ -129,6 +147,10 @@ impl AuditSink for MemoryAuditLog {
 
     fn records(&self) -> Result<Vec<AuditRecord>, JobError> {
         Ok(self.locked().clone())
+    }
+
+    fn records_since(&self, skip: usize) -> Result<Vec<AuditRecord>, JobError> {
+        Ok(self.locked().iter().skip(skip).cloned().collect())
     }
 }
 
@@ -198,6 +220,7 @@ fn unescape_field(s: &str) -> String {
 impl AuditRecord {
     fn escaped(&self) -> Self {
         Self {
+            registry: self.registry.clone(),
             job: self.job,
             argv: self.argv.iter().map(|a| escape_field(a)).collect(),
             cwd: escape_field(&self.cwd),
@@ -259,11 +282,26 @@ impl AuditSink for FileAuditLog {
     }
 
     fn records(&self) -> Result<Vec<AuditRecord>, JobError> {
+        self.records_since(0)
+    }
+
+    /// Seeks past `skip` lines rather than decoding them, so polling a log that
+    /// only grows costs the new tail instead of the whole history.
+    fn records_since(&self, skip: usize) -> Result<Vec<AuditRecord>, JobError> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             // No file yet simply means no history.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(JobError::Io(e)),
+        };
+        let text: String = if skip == 0 {
+            text
+        } else {
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .skip(skip)
+                .collect::<Vec<_>>()
+                .join("\n")
         };
         // Skip any line that does not parse rather than failing the whole read:
         // a torn final line from a crash must not cost every prior record. This
