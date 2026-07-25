@@ -1,10 +1,9 @@
 //! Phase 1 substrate tests — *a local job is the unit*.
 //!
-//! These are the first failing tests of the v1 plan: they exercise the five job
-//! properties (id, live output, control handle, terminal record) over real local
-//! commands, spawned argv-only. They fail today because the registry methods are
-//! scaffolded stubs (`JobError::NotImplemented`); the next step implements the
-//! minimum to make them pass.
+//! These exercise the job properties (id, live output, control handle, terminal
+//! record) over real local commands, spawned argv-only, on an **ungoverned**
+//! registry — the bare substrate with no rule-set in front. The governance gate
+//! is covered separately in `governance.rs`.
 //!
 //! implements: job-is-the-unit-not-rpc
 //! implements: argv-not-shell

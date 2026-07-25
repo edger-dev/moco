@@ -20,8 +20,6 @@ pub enum JobError {
     NotPending(JobId),
     /// The node's committed rule seed could not be parsed.
     Seed(String),
-    /// The operation is scaffolded but not yet implemented.
-    NotImplemented,
     /// An I/O error handling a job's file-backed output.
     Io(std::io::Error),
 }
@@ -39,7 +37,6 @@ impl fmt::Display for JobError {
             }
             JobError::NotPending(id) => write!(f, "job is not awaiting approval: {id}"),
             JobError::Seed(msg) => write!(f, "{msg}"),
-            JobError::NotImplemented => write!(f, "not implemented"),
             JobError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
