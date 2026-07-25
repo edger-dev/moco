@@ -4,9 +4,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
 use crate::preflight::Preflight;
@@ -42,6 +43,15 @@ struct JobHandle {
     /// The request held back while the job awaits approval. `Some` exactly when
     /// the status is `PendingApproval`; this is what a decision spawns.
     pending: Option<JobRequest>,
+    /// The authority this job resolved under.
+    verdict: Verdict,
+    /// The confined directory it runs in — echoed on the outcome and the record.
+    resolved_cwd: PathBuf,
+    /// Exactly the argv that ran (updated when an approval corrects it).
+    argv: Vec<String>,
+    /// Set once its terminal record has been written, so no attempt is audited
+    /// twice however many times it is awaited.
+    audited: bool,
 }
 
 #[derive(Default)]
@@ -168,6 +178,18 @@ fn resolve_program(program: &str, cwd: &Path) -> Option<PathBuf> {
     })
 }
 
+/// The self-describing terminal record of a job: where it ran and under what
+/// authority, alongside its status.
+///
+/// implements: agent-self-sufficiency
+fn outcome_of(handle: &JobHandle) -> Outcome {
+    Outcome {
+        status: handle.status.clone(),
+        verdict: handle.verdict,
+        resolved_cwd: handle.resolved_cwd.clone(),
+    }
+}
+
 /// Spawn `argv` directly into an already-open, file-backed capture. Never goes
 /// through a shell, and never re-opens the capture by path.
 ///
@@ -188,6 +210,7 @@ fn spawn_child(argv: &[String], cwd: &Path, capture: &File) -> Result<Child, Job
         .spawn()
         .map_err(|source| JobError::Spawn {
             program: program.clone(),
+            searched_path: effective_path(),
             source,
         })
 }
@@ -212,6 +235,9 @@ pub struct JobRegistry {
     /// Deliberately no `Default`/`new()`: an ungoverned registry must be asked
     /// for by name so it can never be produced by `..Default::default()`.
     policy: Option<NodePolicy>,
+    /// Where terminal records are appended. Always present, so every registry
+    /// has a history even when no durable sink was configured.
+    audit: Arc<dyn AuditSink>,
 }
 
 impl JobRegistry {
@@ -221,6 +247,7 @@ impl JobRegistry {
         Self {
             inner: Mutex::new(Inner::default()),
             policy: None,
+            audit: Arc::new(MemoryAuditLog::new()),
         }
     }
 
@@ -231,7 +258,23 @@ impl JobRegistry {
         Self {
             inner: Mutex::new(Inner::default()),
             policy: Some(policy),
+            audit: Arc::new(MemoryAuditLog::new()),
         }
+    }
+
+    /// Send this registry's audit records to a durable sink.
+    pub fn with_audit(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit = sink;
+        self
+    }
+
+    /// The audit history, for read-only introspection: what worked, what got
+    /// denied.
+    ///
+    /// implements: agent-self-sufficiency
+    /// implements: audit-every-attempt
+    pub fn audit(&self) -> &Arc<dyn AuditSink> {
+        &self.audit
     }
 
     /// The node's governance, for read-only introspection. The agent may see
@@ -332,6 +375,17 @@ impl JobRegistry {
             started: Instant::now(),
             killed: false,
             pending: None,
+            // A pending job's default fate is the fail-closed one; a decision
+            // overrides it.
+            verdict: match disposition {
+                Disposition::Allow if self.policy.is_none() => Verdict::Ungoverned,
+                Disposition::Allow => Verdict::SeedAllow,
+                Disposition::Deny => Verdict::SeedDeny,
+                Disposition::NeedsApproval => Verdict::NoApprover,
+            },
+            resolved_cwd: request.cwd.clone(),
+            argv: request.argv.clone(),
+            audited: false,
         };
 
         match disposition {
@@ -427,6 +481,7 @@ impl JobRegistry {
 
         if edited_disposition == Some(Disposition::Deny) {
             handle.status = JobStatus::Denied(DeniedReason::Rule);
+            handle.verdict = Verdict::SeedDeny;
             handle.pending = None;
             return Ok(());
         }
@@ -439,6 +494,7 @@ impl JobRegistry {
         match decision {
             Decision::DenyOnce => {
                 handle.status = JobStatus::Denied(DeniedReason::Decision);
+                handle.verdict = Verdict::RejectedOnce;
             }
             Decision::AllowOnce { edited_argv } => {
                 // An edited argv is the correction back-channel: it, not the
@@ -459,6 +515,11 @@ impl JobRegistry {
                     Ok(child) => {
                         handle.child = Some(child);
                         handle.status = JobStatus::Running;
+                        // The approval is the authority, and the argv that ran
+                        // is what the record must name.
+                        handle.verdict = Verdict::ApprovedOnce;
+                        handle.argv = argv;
+                        handle.resolved_cwd = cwd;
                         // The execution deadline runs from the spawn, not from
                         // the moment the job entered the approval queue.
                         handle.started = Instant::now();
@@ -468,6 +529,7 @@ impl JobRegistry {
                         // that would strand it until the approval timeout and
                         // report the wrong reason.
                         handle.status = JobStatus::Denied(DeniedReason::Decision);
+                        handle.verdict = Verdict::RejectedOnce;
                         return Err(e);
                     }
                 }
@@ -511,7 +573,7 @@ impl JobRegistry {
         loop {
             // A child taken out under the lock and reaped after releasing it:
             // never block the whole registry on another process exiting.
-            let mut expired: Option<Child> = None;
+            let mut expired: Option<(Child, Outcome)> = None;
             {
                 let mut inner = self.locked();
                 let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
@@ -521,9 +583,7 @@ impl JobRegistry {
                     .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
                 if handle.status.is_terminal() {
-                    return Ok(Outcome {
-                        status: handle.status.clone(),
-                    });
+                    return Ok(outcome_of(handle));
                 }
 
                 // Fail closed: nobody decided in time.
@@ -532,9 +592,7 @@ impl JobRegistry {
                 {
                     handle.status = JobStatus::Denied(DeniedReason::NoApprover);
                     handle.pending = None;
-                    return Ok(Outcome {
-                        status: handle.status.clone(),
-                    });
+                    return Ok(outcome_of(handle));
                 }
 
                 if let Some(child) = handle.child.as_mut() {
@@ -550,9 +608,7 @@ impl JobRegistry {
                             }
                         };
                         handle.child = None;
-                        return Ok(Outcome {
-                            status: handle.status.clone(),
-                        });
+                        return Ok(outcome_of(handle));
                     }
 
                     if handle
@@ -560,17 +616,17 @@ impl JobRegistry {
                         .is_some_and(|dl| handle.started.elapsed() >= dl)
                     {
                         handle.status = JobStatus::TimedOut;
-                        expired = handle.child.take();
+                        if let Some(child) = handle.child.take() {
+                            expired = Some((child, outcome_of(handle)));
+                        }
                     }
                 }
             }
 
-            if let Some(mut child) = expired {
+            if let Some((mut child, outcome)) = expired {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Ok(Outcome {
-                    status: JobStatus::TimedOut,
-                });
+                return Ok(outcome);
             }
             std::thread::sleep(POLL);
         }
@@ -588,6 +644,7 @@ impl JobRegistry {
 
         if handle.status == JobStatus::PendingApproval {
             handle.status = JobStatus::Denied(DeniedReason::Decision);
+            handle.verdict = Verdict::RejectedOnce;
             handle.pending = None;
             return Ok(());
         }

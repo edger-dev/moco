@@ -7,9 +7,11 @@ use crate::job::JobId;
 pub enum JobError {
     /// A job was started with no program to run.
     EmptyArgv,
-    /// The program could not be spawned. Names the binary for a legible failure.
+    /// The program could not be spawned. Names the binary **and** the PATH that
+    /// was searched, so the fix is obvious rather than a guess.
     Spawn {
         program: String,
+        searched_path: String,
         source: std::io::Error,
     },
     /// No job with this id is registered.
@@ -20,6 +22,8 @@ pub enum JobError {
     NotPending(JobId),
     /// The node's committed rule seed could not be parsed.
     Seed(String),
+    /// An audit record could not be written or read back.
+    Audit(String),
     /// An I/O error handling a job's file-backed output.
     Io(std::io::Error),
 }
@@ -28,8 +32,15 @@ impl fmt::Display for JobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JobError::EmptyArgv => write!(f, "empty argv: a job needs a program to run"),
-            JobError::Spawn { program, source } => {
-                write!(f, "failed to spawn '{program}': {source}")
+            JobError::Spawn {
+                program,
+                searched_path,
+                source,
+            } => {
+                write!(
+                    f,
+                    "failed to spawn '{program}': {source} (PATH searched: {searched_path})"
+                )
             }
             JobError::NotFound(id) => write!(f, "no such job: {id}"),
             JobError::CwdEscape { cwd, root } => {
@@ -37,6 +48,7 @@ impl fmt::Display for JobError {
             }
             JobError::NotPending(id) => write!(f, "job is not awaiting approval: {id}"),
             JobError::Seed(msg) => write!(f, "{msg}"),
+            JobError::Audit(msg) => write!(f, "{msg}"),
             JobError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }

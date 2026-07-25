@@ -2,6 +2,10 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use facet::Facet;
+
+use crate::audit::Verdict;
+
 /// A job's identity — registry-assigned, unique, and addressable across a
 /// disconnect. The load-bearing first property of a job.
 ///
@@ -18,7 +22,8 @@ impl fmt::Display for JobId {
 /// Why a job was denied.
 ///
 /// implements: approval-is-a-job-state
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DeniedReason {
     /// A deny rule matched this exact argv.
     Rule,
@@ -35,7 +40,8 @@ pub enum DeniedReason {
 ///
 /// implements: job-is-the-unit-not-rpc
 /// implements: approval-is-a-job-state
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+#[repr(u8)]
 pub enum JobStatus {
     /// Registered but not spawned: awaiting a human decision.
     PendingApproval,
@@ -101,14 +107,23 @@ pub struct Tail {
     pub status: JobStatus,
 }
 
-/// A job's terminal record — the fourth property of a job. In later phases this
-/// grows into a self-describing outcome (the resolved cwd and the verdict it ran
-/// under); v1 carries the terminal status.
+/// A job's terminal record — the fourth property of a job, and **self-
+/// describing**: it says where it ran and under what authority, so the agent
+/// never has to guess whether a relative cwd landed where it meant or whether an
+/// unmatched command was auto-allowed or approved once.
+///
+/// `verdict` here is the *same* value written to the audit record — one source
+/// of truth, not a parallel one.
 ///
 /// implements: job-is-the-unit-not-rpc
+/// implements: agent-self-sufficiency
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub status: JobStatus,
+    /// The authority this job resolved under.
+    pub verdict: Verdict,
+    /// The absolute, symlink-resolved directory it was confined to.
+    pub resolved_cwd: PathBuf,
 }
 
 impl Outcome {
