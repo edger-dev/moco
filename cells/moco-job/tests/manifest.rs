@@ -227,3 +227,28 @@ fn the_console_cannot_start_by_name() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **Only `name` and `argv` are required.** A job that wants no automatic
+/// behaviour of any kind says nothing about it, and gets the unsurprising
+/// defaults — a one-shot, started manually, never restarted.
+///
+/// implements: autostart-and-restart-are-orthogonal
+#[test]
+fn everything_but_name_and_argv_defaults() {
+    let ws = workspace(
+        "defaults",
+        Some(r#"proc ({name build, argv (cargo build)})"#),
+    );
+
+    let manifest = Manifest::load(&ws).expect("a minimal entry should load");
+    let entry = manifest.get("build").expect("declared");
+
+    assert_eq!(entry.argv, argv(&["cargo", "build"]));
+    assert_eq!(entry.cwd, "", "the workspace root");
+    assert_eq!(entry.deadline_ms, 0, "unbounded");
+    assert_eq!(entry.lifetime, moco_job::Lifetime::OneShot);
+    assert_eq!(entry.restart, moco_job::RestartPolicy::Never);
+    assert_eq!(entry.autostart, moco_job::Autostart::Manual);
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

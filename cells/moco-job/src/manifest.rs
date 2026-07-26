@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use facet::Facet;
 
 use crate::error::JobError;
+use crate::lifecycle::{Autostart, Lifetime, RestartPolicy};
 
 /// The manifest's filename, at the workspace root.
 ///
@@ -26,6 +27,11 @@ use crate::error::JobError;
 pub const MANIFEST_FILE: &str = "moco-processes.styx";
 
 /// One declared job.
+///
+/// Only `name` and `argv` are required. Everything else defaults to the
+/// unsurprising thing — a one-shot, started manually, never restarted, run at
+/// the workspace root with no deadline — so a job that wants no automatic
+/// behaviour of any kind says nothing about it.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct ProcEntry {
     /// Unique within this workspace. The fully-qualified id is
@@ -37,9 +43,20 @@ pub struct ProcEntry {
     pub argv: Vec<String>,
     /// Where to run it, relative to the workspace root. Empty means the root
     /// itself, which is what almost every declared job wants.
+    #[facet(default)]
     pub cwd: String,
     /// Execution deadline in milliseconds; 0 means unbounded.
+    #[facet(default)]
     pub deadline_ms: u64,
+    /// Whether this is expected to end or to keep running.
+    #[facet(default = Lifetime::OneShot)]
+    pub lifetime: Lifetime,
+    /// What happens when it exits. Meaningful only for a service.
+    #[facet(default = RestartPolicy::Never)]
+    pub restart: RestartPolicy,
+    /// When it is *first* started, and by whom.
+    #[facet(default = Autostart::Manual)]
+    pub autostart: Autostart,
 }
 
 /// Everything one workspace declares.
@@ -48,12 +65,19 @@ pub struct ProcEntry {
 ///
 /// ```text
 /// proc (
-///   {name check,      argv (cargo check),        cwd "",    deadline_ms 0}
-///   {name unit-tests,  argv (cargo test --lib),  cwd "",    deadline_ms 600000}
+///   {name build, argv (cargo build)}
+///   {name check, argv (cargo check),
+///    lifetime @Service, restart @OnFailure, autostart @Session}
 /// )
 /// ```
 ///
 /// `cwd` is relative to the workspace root, and empty means the root itself.
+///
+/// Quote an argv element that would otherwise read as something else: bare
+/// `true` and `false` parse as booleans, so the `/bin/true` command is
+/// `argv ("true")`. The parser refuses the mismatch rather than coercing, so
+/// this surfaces as a load error naming the file — not as a job that runs
+/// something unexpected.
 #[derive(Facet, Debug, Clone, Default, PartialEq, Eq)]
 pub struct Manifest {
     pub proc: Vec<ProcEntry>,
@@ -138,6 +162,9 @@ mod tests {
                 argv: vec!["cargo".into(), "check".into()],
                 cwd: String::new(),
                 deadline_ms: 0,
+                lifetime: Lifetime::OneShot,
+                restart: RestartPolicy::Never,
+                autostart: Autostart::Manual,
             }],
         };
         let text = facet_styx::to_string(&manifest).expect("encode");

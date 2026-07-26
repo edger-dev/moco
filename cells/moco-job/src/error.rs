@@ -24,6 +24,8 @@ pub enum JobError {
         manifest: String,
         declared: Vec<String>,
     },
+    /// A restart was asked for on a job with no declaration to re-read.
+    NotDeclared { job: JobId },
     /// A name was used without a workspace to resolve it against.
     NameNeedsWorkspace { name: String },
     /// A caller tried to write to a job owned by another workspace.
@@ -84,6 +86,12 @@ impl fmt::Display for JobError {
                 } else {
                     format!(" (it declares: {})", declared.join(", "))
                 }
+            ),
+            JobError::NotDeclared { job } => write!(
+                f,
+                "job {job} was started ad-hoc, so there is no declaration to \
+                 re-read and nothing to restart it from. Start it again with the \
+                 argv you want, or declare it in the workspace's manifest."
             ),
             JobError::NameNeedsWorkspace { name } => write!(
                 f,

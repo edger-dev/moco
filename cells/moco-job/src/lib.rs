@@ -10,6 +10,7 @@
 pub mod audit;
 pub mod error;
 pub mod job;
+pub mod lifecycle;
 pub mod manifest;
 pub mod preflight;
 pub mod procfs;
@@ -22,6 +23,7 @@ pub mod wire;
 pub use audit::{AuditRecord, AuditSink, FileAuditLog, MemoryAuditLog, Verdict};
 pub use error::JobError;
 pub use job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
+pub use lifecycle::{Autostart, Lifetime, RestartPolicy};
 pub use manifest::{MANIFEST_FILE, Manifest, ProcEntry};
 pub use preflight::Preflight;
 pub use procfs::{Liveness, liveness};

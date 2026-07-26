@@ -5,6 +5,7 @@ use std::time::Duration;
 use facet::Facet;
 
 use crate::audit::Verdict;
+use crate::lifecycle::{Lifetime, RestartPolicy};
 use crate::scope::Scope;
 
 /// A job's identity — registry-assigned, addressable across a disconnect, and
@@ -119,6 +120,10 @@ pub struct JobRequest {
     pub scope: Option<Scope>,
     /// The manifest name this job is declared under, if any.
     pub name: Option<String>,
+    /// Whether this is expected to end or to keep running.
+    pub lifetime: Lifetime,
+    /// What happens when it exits. Meaningful only for a service.
+    pub restart: RestartPolicy,
     /// Optional execution deadline. A job still running past it lands
     /// `TimedOut` when it is next awaited (`wait` / `run`). v1 has no background
     /// reaper, so a job that is never awaited is not force-expired — a full
@@ -138,6 +143,8 @@ impl JobRequest {
             deadline: None,
             scope: None,
             name: None,
+            lifetime: Lifetime::OneShot,
+            restart: RestartPolicy::Never,
         }
     }
 
@@ -155,6 +162,13 @@ impl JobRequest {
     /// Record the manifest name this job was declared under.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Declare what kind of job this is and what happens when it exits.
+    pub fn with_lifecycle(mut self, lifetime: Lifetime, restart: RestartPolicy) -> Self {
+        self.lifetime = lifetime;
+        self.restart = restart;
         self
     }
 }

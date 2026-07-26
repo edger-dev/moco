@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
+use crate::lifecycle::{Lifetime, RestartPolicy};
 use crate::manifest::Manifest;
 use crate::preflight::Preflight;
 use crate::procfs::{self, Liveness};
@@ -32,6 +33,9 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         &handle.status,
         &handle.scope,
         handle.name.as_deref(),
+        handle.lifetime,
+        handle.restart,
+        handle.restarts,
         handle.pid,
         handle.pid_start,
         &handle.capture,
@@ -91,6 +95,10 @@ struct JobHandle {
     /// The manifest name this job was declared under, if any. Ad-hoc jobs have
     /// none — a name is what a *declaration* gives you.
     name: Option<String>,
+    lifetime: Lifetime,
+    restart: RestartPolicy,
+    /// How many times the supervisor has brought this job back.
+    restarts: u64,
     /// True when this handle was rebuilt from an on-disk record rather than
     /// spawned by this registry: we hold no child handle, so there is no exit
     /// code to reap and its end is reported `OutcomeUnknown`.
@@ -346,6 +354,9 @@ impl JobRegistry {
                     audited: record.audited,
                     scope: record.scope.clone(),
                     name: (!record.name.is_empty()).then(|| record.name.clone()),
+                    lifetime: record.lifetime,
+                    restart: record.restart,
+                    restarts: record.restarts,
                     pid: record.pid,
                     pid_start: record.pid_start,
                     adopted: true,
@@ -437,11 +448,142 @@ impl JobRegistry {
 
         let mut request = JobRequest::new(entry.argv.clone(), cwd)
             .in_scope(scope.clone())
-            .named(&entry.name);
+            .named(&entry.name)
+            .with_lifecycle(entry.lifetime, entry.restart);
         if entry.deadline_ms > 0 {
             request = request.with_deadline(Duration::from_millis(entry.deadline_ms));
         }
         self.start(request)
+    }
+
+    /// A job's current status.
+    pub fn status_of(&self, id: &JobId) -> Option<JobStatus> {
+        self.locked().jobs.get(id).map(|h| h.status.clone())
+    }
+
+    /// How many times this *instance* has been brought back.
+    ///
+    /// Usually you want [`declared`](Self::declared) instead: a restart mints a
+    /// new job id, so a count read from the id you started with stops moving the
+    /// moment it is restarted.
+    pub fn restarts_of(&self, id: &JobId) -> u64 {
+        self.locked().jobs.get(id).map(|h| h.restarts).unwrap_or(0)
+    }
+
+    /// The current instance of a declared job, and how many times it has been
+    /// brought back.
+    ///
+    /// **A service's durable identity is `workspace:name`, not its job id.**
+    /// Each spawn is a new instance with a new id — that is what makes the
+    /// record of the previous one survivable — so "how many times has `check`
+    /// restarted?" is a question about the *declaration*, and this is where it
+    /// is answered.
+    ///
+    /// implements: workspace-is-the-owner-not-session
+    pub fn declared(&self, scope: &Scope, name: &str) -> Option<(JobId, u64)> {
+        let inner = self.locked();
+        inner
+            .jobs
+            .iter()
+            .filter(|(_, h)| h.scope == *scope && h.name.as_deref() == Some(name))
+            // Ids lead with a millisecond stamp, so the greatest is the newest.
+            .max_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(id, h)| (id.clone(), h.restarts))
+    }
+
+    /// Stop a declared job and start it again from its **current** declaration.
+    ///
+    /// The manifest is re-read, and the new declaration goes through the node's
+    /// gate again. Re-reading without re-authorizing would be a hole rather than
+    /// a convenience: the manifest lives in a checkout the agent can edit, so
+    /// "edit the file, hit restart" would run a never-approved argv while the
+    /// node never got a say.
+    ///
+    /// Only a **declared** job can be restarted. An ad-hoc one has nothing to
+    /// re-read, and respawning a spec cached at first start is precisely the
+    /// silently-stale behaviour this avoids.
+    ///
+    /// implements: manifest-declares-node-authorizes
+    pub fn restart(&self, id: &JobId, caller: &Caller) -> Result<JobId, JobError> {
+        let (owner, name) = {
+            let inner = self.locked();
+            let handle = inner
+                .jobs
+                .get(id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
+            (handle.scope.clone(), handle.name.clone())
+        };
+
+        if !caller.may_write(&owner) {
+            return Err(JobError::ForeignWorkspace {
+                job: id.clone(),
+                owner: owner.to_string(),
+                caller: caller.to_string(),
+            });
+        }
+        let Some(name) = name else {
+            return Err(JobError::NotDeclared { job: id.clone() });
+        };
+
+        // Stop the old instance first; a restart that left two running would be
+        // a duplicate, not a restart.
+        let _ = self.kill(id, caller);
+        self.start_named(&name, caller)
+    }
+
+    /// One supervision tick: apply each job's restart policy.
+    ///
+    /// Deliberately **driven by the caller** rather than by a thread this crate
+    /// spawns. The engine links no runtime, so the daemon owns the interval —
+    /// which also makes the policy testable without sleeping on a background
+    /// task, and makes the tick rate the natural rate limit on a service that
+    /// crashes immediately.
+    ///
+    /// implements: autostart-and-restart-are-orthogonal
+    pub fn supervise(&self) -> Vec<JobId> {
+        // Settle first: a job nobody has looked at has not been reaped, and a
+        // policy cannot act on a state that has not been observed.
+        let candidates: Vec<JobId> = self.locked().jobs.keys().cloned().collect();
+        for id in &candidates {
+            let _ = self.tail(id, u64::MAX);
+        }
+
+        let due: Vec<(JobId, Scope, String)> = {
+            let inner = self.locked();
+            inner
+                .jobs
+                .iter()
+                .filter(|(_, h)| {
+                    h.status.is_terminal()
+                        && h.restart.should_restart(h.lifetime, &h.status, h.killed)
+                })
+                .filter_map(|(id, h)| {
+                    h.name
+                        .clone()
+                        .map(|name| (id.clone(), h.scope.clone(), name))
+                })
+                .collect()
+        };
+
+        let mut restarted = Vec::new();
+        for (id, scope, name) in due {
+            let previous = self.locked().jobs.get(&id).map(|h| h.restarts).unwrap_or(0);
+            // The supervisor acts on the workspace's own declaration, so it
+            // asks as that workspace — not with global authority it has no
+            // reason to hold.
+            if let Ok(new_id) = self.start_named(&name, &Caller::Scoped(scope)) {
+                if let Some(handle) = self.locked().jobs.get_mut(&new_id) {
+                    handle.restarts = previous + 1;
+                }
+                // The old entry has been superseded; stop counting it as due.
+                if let Some(old) = self.locked().jobs.get_mut(&id) {
+                    old.restarts = previous + 1;
+                    old.killed = true;
+                }
+                restarted.push(new_id);
+            }
+        }
+        restarted
     }
 
     /// Every job this registry knows about, in creation order.
@@ -656,6 +798,8 @@ impl JobRegistry {
             deadline: req.deadline,
             scope: Some(scope.clone()),
             name: req.name.clone(),
+            lifetime: req.lifetime,
+            restart: req.restart,
         };
 
         let mut handle = JobHandle {
@@ -681,6 +825,9 @@ impl JobRegistry {
             audited: false,
             scope,
             name: req.name.clone(),
+            lifetime: req.lifetime,
+            restart: req.restart,
+            restarts: 0,
             pid: 0,
             pid_start: 0,
             adopted: false,
