@@ -7,6 +7,25 @@ use crate::job::JobId;
 pub enum JobError {
     /// A job was started with no program to run.
     EmptyArgv,
+    /// A workspace's manifest could not be read.
+    ///
+    /// Distinct from "nothing is declared": a file that is absent and a file
+    /// that is broken are different states, and reporting the second as the
+    /// first blames a missing entry for a file-level fault.
+    ///
+    /// implements: config-failure-never-degrades-to-empty
+    Manifest { path: String, detail: String },
+    /// A name that no manifest entry declares.
+    ///
+    /// Names the manifest that was actually read, so nobody hunts for a typo in
+    /// the name when the file they edited was a different one.
+    Undeclared {
+        name: String,
+        manifest: String,
+        declared: Vec<String>,
+    },
+    /// A name was used without a workspace to resolve it against.
+    NameNeedsWorkspace { name: String },
     /// A caller tried to write to a job owned by another workspace.
     ///
     /// Names **both** workspaces: the caller cannot fix this without knowing
@@ -47,6 +66,31 @@ impl fmt::Display for JobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JobError::EmptyArgv => write!(f, "empty argv: a job needs a program to run"),
+            JobError::Manifest { path, detail } => write!(
+                f,
+                "the manifest at {path} could not be read: {detail}. \
+                 This is a problem with the file, not with any one entry — \
+                 nothing in it is being applied until it parses."
+            ),
+            JobError::Undeclared {
+                name,
+                manifest,
+                declared,
+            } => write!(
+                f,
+                "no job named '{name}' is declared in {manifest}{}",
+                if declared.is_empty() {
+                    " (it declares nothing)".to_string()
+                } else {
+                    format!(" (it declares: {})", declared.join(", "))
+                }
+            ),
+            JobError::NameNeedsWorkspace { name } => write!(
+                f,
+                "'{name}' is a declared job's name, and a name only means \
+                 something relative to a workspace's manifest — so the caller \
+                 has to be a session in a workspace, not the console."
+            ),
             JobError::ForeignWorkspace { job, owner, caller } => write!(
                 f,
                 "job {job} is owned by workspace '{owner}', and this caller is \

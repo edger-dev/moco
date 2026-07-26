@@ -45,6 +45,9 @@ pub struct JobRecord {
     /// Who owns this job. Persisted, so ownership survives the daemon that
     /// recorded it along with everything else about the job.
     pub scope: Scope,
+    /// The manifest name it was declared under; empty for an ad-hoc job. A
+    /// sentinel rather than an option, to keep the record one flat Styx line.
+    pub name: String,
     /// The child's pid, or 0 if it never spawned.
     pub pid: u32,
     /// The kernel start time of `pid`. Compared on every probe so a **reused**
@@ -288,6 +291,7 @@ pub(crate) fn record_of(
     verdict: Verdict,
     status: &JobStatus,
     scope: &Scope,
+    name: Option<&str>,
     pid: u32,
     pid_start: u64,
     capture: &Path,
@@ -301,6 +305,7 @@ pub(crate) fn record_of(
         verdict,
         status: status.clone(),
         scope: scope.clone(),
+        name: name.unwrap_or_default().to_string(),
         pid,
         pid_start,
         capture: capture.to_string_lossy().into_owned(),

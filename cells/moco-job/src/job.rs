@@ -117,6 +117,8 @@ pub struct JobRequest {
     /// A caller that knows better — a session starting work on behalf of its own
     /// workspace while the job runs elsewhere — says so.
     pub scope: Option<Scope>,
+    /// The manifest name this job is declared under, if any.
+    pub name: Option<String>,
     /// Optional execution deadline. A job still running past it lands
     /// `TimedOut` when it is next awaited (`wait` / `run`). v1 has no background
     /// reaper, so a job that is never awaited is not force-expired — a full
@@ -135,6 +137,7 @@ impl JobRequest {
             cwd: cwd.into(),
             deadline: None,
             scope: None,
+            name: None,
         }
     }
 
@@ -146,6 +149,12 @@ impl JobRequest {
     /// Declare which workspace owns this job.
     pub fn in_scope(mut self, scope: Scope) -> Self {
         self.scope = Some(scope);
+        self
+    }
+
+    /// Record the manifest name this job was declared under.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 }

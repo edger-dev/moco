@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
+use crate::manifest::Manifest;
 use crate::preflight::Preflight;
 use crate::procfs::{self, Liveness};
 use crate::record::{RecordStore, record_of};
@@ -30,6 +31,7 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         handle.verdict,
         &handle.status,
         &handle.scope,
+        handle.name.as_deref(),
         handle.pid,
         handle.pid_start,
         &handle.capture,
@@ -86,6 +88,9 @@ struct JobHandle {
     /// Which workspace owns this job. Not the session that asked for it: a
     /// session restart must never orphan or kill a job.
     scope: Scope,
+    /// The manifest name this job was declared under, if any. Ad-hoc jobs have
+    /// none — a name is what a *declaration* gives you.
+    name: Option<String>,
     /// True when this handle was rebuilt from an on-disk record rather than
     /// spawned by this registry: we hold no child handle, so there is no exit
     /// code to reap and its end is reported `OutcomeUnknown`.
@@ -340,6 +345,7 @@ impl JobRegistry {
                     argv: record.argv.clone(),
                     audited: record.audited,
                     scope: record.scope.clone(),
+                    name: (!record.name.is_empty()).then(|| record.name.clone()),
                     pid: record.pid,
                     pid_start: record.pid_start,
                     adopted: true,
@@ -377,6 +383,65 @@ impl JobRegistry {
     /// implements: reads-global-writes-own-workspace
     pub fn scope_of(&self, id: &JobId) -> Option<Scope> {
         self.locked().jobs.get(id).map(|h| h.scope.clone())
+    }
+
+    /// The manifest name a job was declared under, if it was declared.
+    ///
+    /// A read, so it is node-global like every other read.
+    pub fn name_of(&self, id: &JobId) -> Option<String> {
+        self.locked().jobs.get(id).and_then(|h| h.name.clone())
+    }
+
+    /// Exactly the argv a job ran (or would have run).
+    pub fn argv_of(&self, id: &JobId) -> Option<Vec<String>> {
+        self.locked().jobs.get(id).map(|h| h.argv.clone())
+    }
+
+    /// Start the job a workspace declares under `name`.
+    ///
+    /// The manifest is **re-read on every start**, so an edit takes effect
+    /// without restarting anything. A config change that silently fails to apply
+    /// is the kind of thing that costs a debugging session to notice.
+    ///
+    /// The entry is then started down the **same path as any other request** —
+    /// including the node's gate. A declaration says what a workspace wants to
+    /// run; it does not say the node agrees.
+    ///
+    /// implements: manifest-declares-node-authorizes
+    pub fn start_named(&self, name: &str, caller: &Caller) -> Result<JobId, JobError> {
+        // A name is only meaningful relative to a workspace's manifest, so the
+        // console — which has no workspace — cannot use one.
+        let Caller::Scoped(scope) = caller else {
+            return Err(JobError::NameNeedsWorkspace {
+                name: name.to_string(),
+            });
+        };
+        let Some(root) = scope.root() else {
+            return Err(JobError::NameNeedsWorkspace {
+                name: name.to_string(),
+            });
+        };
+
+        let manifest = Manifest::load(root)?;
+        let entry = manifest.get(name).ok_or_else(|| JobError::Undeclared {
+            name: name.to_string(),
+            manifest: Manifest::path_in(root).display().to_string(),
+            declared: manifest.names().iter().map(|n| n.to_string()).collect(),
+        })?;
+
+        let cwd = if entry.cwd.is_empty() {
+            PathBuf::from(root)
+        } else {
+            PathBuf::from(root).join(&entry.cwd)
+        };
+
+        let mut request = JobRequest::new(entry.argv.clone(), cwd)
+            .in_scope(scope.clone())
+            .named(&entry.name);
+        if entry.deadline_ms > 0 {
+            request = request.with_deadline(Duration::from_millis(entry.deadline_ms));
+        }
+        self.start(request)
     }
 
     /// Every job this registry knows about, in creation order.
@@ -590,6 +655,7 @@ impl JobRegistry {
             cwd,
             deadline: req.deadline,
             scope: Some(scope.clone()),
+            name: req.name.clone(),
         };
 
         let mut handle = JobHandle {
@@ -614,6 +680,7 @@ impl JobRegistry {
             argv: request.argv.clone(),
             audited: false,
             scope,
+            name: req.name.clone(),
             pid: 0,
             pid_start: 0,
             adopted: false,
