@@ -1,1 +1,3 @@
+{"@schema":"kinora-commit-archive-v1"}
 {"event_kind":"store","kind":"markdown","id":"3aa206d0a5ecd433ea159c78d3176934e98adef12bcca380b42ccf2b1ced591b","hash":"3aa206d0a5ecd433ea159c78d3176934e98adef12bcca380b42ccf2b1ced591b","parents":[],"ts":"2026-07-26T07:32:57.573699248Z","author":"YJ Park","provenance":"kara","metadata":{"name":"job-connector-is-engine-owned-byte-dispatch","spec::section":"moco","status::active":"true"}}
+{"event_kind":"assign","kind":"kin::assign","id":"3aa206d0a5ecd433ea159c78d3176934e98adef12bcca380b42ccf2b1ced591b","hash":"3aa206d0a5ecd433ea159c78d3176934e98adef12bcca380b42ccf2b1ced591b","parents":[],"ts":"2026-07-26T07:32:57.573699248Z","author":"YJ Park","provenance":"kara","metadata":{"kin::target_root":"specs"}}
