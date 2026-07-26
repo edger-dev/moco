@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use facet::Facet;
 
+use crate::admission::WorktreePolicy;
 use crate::error::JobError;
 use crate::lifecycle::{Autostart, Lifetime, RestartPolicy};
 use crate::port::{self, PortRequest};
@@ -67,6 +68,13 @@ pub struct ProcEntry {
     /// program's benefit.
     #[facet(default)]
     pub port_env: String,
+    /// Where in the repo this may run. Unstated resolves from the port.
+    #[facet(default = WorktreePolicy::Unset)]
+    pub worktree: WorktreePolicy,
+    /// Node names allowed to run it. Empty means anywhere, which is how one
+    /// checked-in manifest stays usable on every machine.
+    #[facet(default)]
+    pub hosts: Vec<String>,
 }
 
 /// Everything one workspace declares.
@@ -206,6 +214,8 @@ mod tests {
                 autostart: Autostart::Manual,
                 port: PortRequest::None,
                 port_env: String::new(),
+                worktree: WorktreePolicy::Unset,
+                hosts: Vec::new(),
             }],
         };
         let text = facet_styx::to_string(&manifest).expect("encode");

@@ -24,6 +24,10 @@ pub enum JobError {
         manifest: String,
         declared: Vec<String>,
     },
+    /// A declared job was refused by a start-time policy gate.
+    ///
+    /// implements: admission-gates-worktree-and-host
+    Refused { name: String, refusal: String },
     /// A restart was asked for on a job with no declaration to re-read.
     NotDeclared { job: JobId },
     /// A name was used without a workspace to resolve it against.
@@ -87,6 +91,9 @@ impl fmt::Display for JobError {
                     format!(" (it declares: {})", declared.join(", "))
                 }
             ),
+            JobError::Refused { name, refusal } => {
+                write!(f, "'{name}' was not started here: {refusal}")
+            }
             JobError::NotDeclared { job } => write!(
                 f,
                 "job {job} was started ad-hoc, so there is no declaration to \

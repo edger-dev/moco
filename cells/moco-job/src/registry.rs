@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::admission;
 use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
@@ -297,6 +298,12 @@ pub struct JobRegistry {
     /// Where terminal records are appended. Always present, so every registry
     /// has a history even when no durable sink was configured.
     audit: Arc<dyn AuditSink>,
+    /// What this node is called, for the host gate.
+    ///
+    /// **Injected, never read from the OS.** Matching `hostname` would make the
+    /// engine call out to the system and drift from the mesh's own idea of what
+    /// this node is named — which is the identity that actually routes.
+    node: String,
 }
 
 impl JobRegistry {
@@ -314,6 +321,7 @@ impl JobRegistry {
             }),
             policy: None,
             audit: Arc::new(MemoryAuditLog::new()),
+            node: String::new(),
         })
     }
 
@@ -328,6 +336,7 @@ impl JobRegistry {
             }),
             policy: Some(policy),
             audit: Arc::new(MemoryAuditLog::new()),
+            node: String::new(),
         })
     }
 
@@ -417,6 +426,17 @@ impl JobRegistry {
         Ok(self)
     }
 
+    /// Name this node, for the host admission gate.
+    pub fn with_node(mut self, node: impl Into<String>) -> Self {
+        self.node = node.into();
+        self
+    }
+
+    /// What this node is called.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
     /// Send this registry's audit records to a durable sink.
     pub fn with_audit(mut self, sink: Arc<dyn AuditSink>) -> Self {
         self.audit = sink;
@@ -475,6 +495,21 @@ impl JobRegistry {
             name: name.to_string(),
             manifest: Manifest::path_in(root).display().to_string(),
             declared: manifest.names().iter().map(|n| n.to_string()).collect(),
+        })?;
+
+        // Policy gates first: a job that may not run *here* should not consume
+        // a port, let alone reach the rule-set. Refusals name the gate, because
+        // an explicit start deserves to know which one said no.
+        admission::check(
+            root,
+            &self.node,
+            entry.worktree,
+            matches!(entry.port, port::PortRequest::Fixed { .. }),
+            &entry.hosts,
+        )
+        .map_err(|refusal| JobError::Refused {
+            name: name.to_string(),
+            refusal: refusal.to_string(),
         })?;
 
         let cwd = if entry.cwd.is_empty() {

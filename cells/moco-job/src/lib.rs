@@ -7,6 +7,7 @@
 //!
 //! implements: job-substrate-is-a-moco-cell-layer
 
+pub mod admission;
 pub mod audit;
 pub mod error;
 pub mod job;
@@ -21,6 +22,7 @@ pub mod rules;
 pub mod scope;
 pub mod wire;
 
+pub use admission::WorktreePolicy;
 pub use audit::{AuditRecord, AuditSink, FileAuditLog, MemoryAuditLog, Verdict};
 pub use error::JobError;
 pub use job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
