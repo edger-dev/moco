@@ -721,6 +721,60 @@ impl JobRegistry {
         self.start_named(&name, caller)
     }
 
+    /// Start this workspace's `session` entries that are not already running.
+    ///
+    /// **The agent's half of the two triggers.** `boot` belongs to the daemon,
+    /// which reads the node-level manifest at startup; `session` belongs here,
+    /// because the daemon does not know every repo on the machine and walking
+    /// the filesystem looking for manifests would be unbounded and surprising.
+    ///
+    /// Idempotent by construction: it starts what is missing and **never stops
+    /// or restarts anything**, so re-running it is always safe.
+    ///
+    /// A refused entry is **skipped silently**. This runs unprompted at session
+    /// start, so a job that is not for this machine or this worktree is not a
+    /// problem to report — it is simply not this session's business. An explicit
+    /// start still says exactly why.
+    ///
+    /// implements: autostart-and-restart-are-orthogonal
+    pub fn ensure(&self, caller: &Caller) -> Result<Vec<JobId>, JobError> {
+        let Caller::Scoped(scope) = caller else {
+            return Err(JobError::NameNeedsWorkspace {
+                name: "<session autostart>".to_string(),
+            });
+        };
+        let Some(root) = scope.root() else {
+            return Err(JobError::NameNeedsWorkspace {
+                name: "<session autostart>".to_string(),
+            });
+        };
+
+        let manifest = Manifest::load(root)?;
+        let mut started = Vec::new();
+        for entry in &manifest.proc {
+            if entry.autostart != crate::lifecycle::Autostart::Session {
+                continue;
+            }
+            // Already running is the common case on a re-run, and is precisely
+            // what "ensure" means: leave it be.
+            if self
+                .declared(scope, &entry.name)
+                .and_then(|(id, _)| self.status_of(&id))
+                .is_some_and(|status| !status.is_terminal())
+            {
+                continue;
+            }
+            match self.start_named(&entry.name, caller) {
+                Ok(id) => started.push(id),
+                // Silent on purpose — see above. A manifest problem is not
+                // silent, though: `Manifest::load` already failed loudly if the
+                // file could not be read at all.
+                Err(_) => continue,
+            }
+        }
+        Ok(started)
+    }
+
     /// One supervision tick: apply each job's restart policy.
     ///
     /// Deliberately **driven by the caller** rather than by a thread this crate
