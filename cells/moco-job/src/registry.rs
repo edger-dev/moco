@@ -785,12 +785,8 @@ impl JobRegistry {
     ///
     /// implements: autostart-and-restart-are-orthogonal
     pub fn supervise(&self) -> Vec<JobId> {
-        // Settle first: a job nobody has looked at has not been reaped, and a
-        // policy cannot act on a state that has not been observed.
-        let candidates: Vec<JobId> = self.locked().jobs.keys().cloned().collect();
-        for id in &candidates {
-            let _ = self.tail(id, u64::MAX);
-        }
+        // A policy cannot act on a state nobody has observed.
+        self.settle_all();
 
         let due: Vec<(JobId, Scope, String)> = {
             let inner = self.locked();
@@ -862,8 +858,26 @@ impl JobRegistry {
         Ok(doomed.len())
     }
 
+    /// Bring every job's status up to date.
+    ///
+    /// A status is only current once someone has looked: a child is reaped when
+    /// it is tailed, and an adopted process is probed then too. Any read that
+    /// *reports* status therefore has to settle first, or it hands back a
+    /// finished job wearing `Running` — which is what a poller acts on.
+    fn settle_all(&self) {
+        let ids: Vec<JobId> = self.locked().jobs.keys().cloned().collect();
+        for id in ids {
+            // Reading from the end: this is for the status, not the bytes.
+            let _ = self.tail(&id, u64::MAX);
+        }
+    }
+
     /// Every job this registry knows about, in creation order.
+    ///
+    /// Settles first, so a finished job is reported finished. Reads are
+    /// node-global, so this spans every workspace.
     pub fn list(&self) -> Vec<(JobId, JobStatus)> {
+        self.settle_all();
         let inner = self.locked();
         let mut out: Vec<(JobId, JobStatus)> = inner
             .jobs

@@ -103,6 +103,45 @@ pub struct WaitReply {
     pub resolved_cwd: String,
 }
 
+/// Start the job a workspace declares under `name`.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct StartNamedRequest {
+    pub name: String,
+    pub caller: WireCaller,
+}
+
+/// Stop a declared job and start it from its current declaration.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct RestartRequest {
+    pub id: String,
+    pub caller: WireCaller,
+}
+
+/// Start this workspace's `session` entries that are not already running.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct EnsureRequest {
+    pub caller: WireCaller,
+}
+
+/// The ids `ensure` started. Empty means everything declared was already up,
+/// which is the normal answer on a re-run.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct EnsureReply {
+    pub started: Vec<String>,
+}
+
+/// Remove terminal entries.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct ClearRequest {
+    pub caller: WireCaller,
+}
+
+/// How many tombstones went.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct ClearReply {
+    pub removed: u64,
+}
+
 /// Terminate a job.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct KillRequest {
@@ -126,6 +165,16 @@ pub struct JobSummary {
     pub id: String,
     pub status: JobStatus,
     pub scope: Scope,
+    /// The declaration it came from; empty for an ad-hoc job.
+    pub name: String,
+    /// The port the node gave it; 0 for none. Visible here rather than only in
+    /// the child's environment, so it is possible to say which checkout's
+    /// server is on which port.
+    pub port: u16,
+    /// Handed over rather than started here.
+    pub external: bool,
+    /// How many times the supervisor has brought it back.
+    pub restarts: u64,
 }
 
 /// Every job this registry knows about.
@@ -157,7 +206,8 @@ impl std::fmt::Display for WireError {
             WireError::UnknownMethod(method) => write!(
                 f,
                 "unknown method `{method}` on the job connector; \
-                 known methods are: start, tail, wait, kill, list"
+                 known methods are: {}",
+                METHODS.join(", ")
             ),
             WireError::Request { method, detail } => {
                 write!(f, "could not decode the request for `{method}`: {detail}")
@@ -257,6 +307,31 @@ pub fn dispatch(
                 },
             )
         }
+        "start_named" => {
+            let req: StartNamedRequest = read(method, request)?;
+            let id = registry.start_named(&req.name, &req.caller.resolve())?;
+            write(method, &StartReply { id: id.0 })
+        }
+        "restart" => {
+            let req: RestartRequest = read(method, request)?;
+            let id = registry.restart(&JobId(req.id), &req.caller.resolve())?;
+            write(method, &StartReply { id: id.0 })
+        }
+        "ensure" => {
+            let req: EnsureRequest = read(method, request)?;
+            let started = registry.ensure(&req.caller.resolve())?;
+            write(
+                method,
+                &EnsureReply {
+                    started: started.into_iter().map(|id| id.0).collect(),
+                },
+            )
+        }
+        "clear" => {
+            let req: ClearRequest = read(method, request)?;
+            let removed = registry.clear(&req.caller.resolve())? as u64;
+            write(method, &ClearReply { removed })
+        }
         "kill" => {
             let req: KillRequest = read(method, request)?;
             registry.kill(&JobId(req.id.clone()), &req.caller.resolve())?;
@@ -268,6 +343,10 @@ pub fn dispatch(
                 .into_iter()
                 .map(|(id, status)| JobSummary {
                     scope: registry.scope_of(&id).unwrap_or(Scope::System),
+                    name: registry.name_of(&id).unwrap_or_default(),
+                    port: registry.port_of(&id).unwrap_or(0),
+                    external: registry.is_external(&id),
+                    restarts: registry.restarts_of(&id),
                     id: id.0,
                     status,
                 })
@@ -285,4 +364,21 @@ pub fn dispatch(
 /// channel the gate exists to constrain.
 ///
 /// implements: intervention-is-the-only-human-write
-pub const METHODS: &[&str] = &["start", "tail", "wait", "kill", "list"];
+pub const METHODS: &[&str] = &[
+    "start",
+    "start_named",
+    "restart",
+    "ensure",
+    "clear",
+    "tail",
+    "wait",
+    "kill",
+    "list",
+];
+
+// `adopt` is deliberately **not** here. Handing the supervisor an arbitrary pid
+// is a node-level act — a peer registering itself, or the daemon handing over
+// itself at startup — not something an agent should be able to ask for. It stays
+// an in-process method until there is a caller with the standing to use it.
+//
+// implements: adopt-is-readopt-parameterized

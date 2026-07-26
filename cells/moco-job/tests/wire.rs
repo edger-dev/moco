@@ -193,3 +193,74 @@ fn tail_settles_a_finished_job_without_a_separate_wait() {
         "tail alone must be enough to see a job finish"
     );
 }
+
+/// The declared verbs are reachable over the wire, and carry the caller so the
+/// engine can scope the write.
+#[test]
+fn the_declared_verbs_round_trip_over_bytes() {
+    let ws = std::env::temp_dir().join(format!("moco-wire-decl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join(".git")).expect("repo");
+    std::fs::write(
+        ws.join(moco_job::MANIFEST_FILE),
+        r#"proc ({name greet, argv (echo hi), autostart @Session})"#,
+    )
+    .expect("manifest");
+    let ws = ws.canonicalize().expect("canonicalize");
+
+    let reg = registry();
+    let caller = wire::WireCaller::Session {
+        cwd: ws.to_string_lossy().into_owned(),
+    };
+
+    // ensure starts the session entry…
+    let payload = wire::encode(&wire::EnsureRequest {
+        caller: caller.clone(),
+    })
+    .expect("encode");
+    let reply: wire::EnsureReply =
+        wire::decode(&wire::dispatch(&reg, "ensure", &payload).expect("ensure")).expect("decode");
+    assert_eq!(reply.started.len(), 1);
+
+    // …the listing shows its declaration name…
+    let listing: wire::ListReply =
+        wire::decode(&wire::dispatch(&reg, "list", b"{}").expect("list")).expect("decode");
+    assert!(listing.jobs.iter().any(|j| j.name == "greet"));
+
+    // …and start_named runs it again by name.
+    let payload = wire::encode(&wire::StartNamedRequest {
+        name: "greet".into(),
+        caller: caller.clone(),
+    })
+    .expect("encode");
+    let started: wire::StartReply =
+        wire::decode(&wire::dispatch(&reg, "start_named", &payload).expect("start_named"))
+            .expect("decode");
+    assert!(!started.id.is_empty());
+
+    // clear takes the tombstones once they are terminal.
+    for _ in 0..100 {
+        let _ = wire::dispatch(&reg, "list", b"{}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let listing: wire::ListReply =
+            wire::decode(&wire::dispatch(&reg, "list", b"{}").expect("list")).expect("decode");
+        if listing.jobs.iter().all(|j| j.status.is_terminal()) {
+            break;
+        }
+    }
+    let payload = wire::encode(&wire::ClearRequest { caller }).expect("encode");
+    let cleared: wire::ClearReply =
+        wire::decode(&wire::dispatch(&reg, "clear", &payload).expect("clear")).expect("decode");
+    assert!(cleared.removed >= 1, "tombstones should have been taken");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// `adopt` is not on the wire: handing the supervisor an arbitrary pid is a
+/// node-level act, not something an agent asks for.
+#[test]
+fn adopt_is_not_reachable_over_the_wire() {
+    let reg = registry();
+    let err = wire::dispatch(&reg, "adopt", b"{}").expect_err("must not be dispatchable");
+    assert!(err.to_string().contains("unknown method"), "got: {err}");
+}
