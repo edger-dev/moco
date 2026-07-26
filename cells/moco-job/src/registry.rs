@@ -11,7 +11,7 @@ use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
 use crate::lifecycle::{Lifetime, RestartPolicy};
 use crate::manifest::Manifest;
-use crate::port::{self, PortRange, PortRequest};
+use crate::port::{self, PortRange};
 use crate::preflight::Preflight;
 use crate::procfs::{self, Liveness};
 use crate::record::{RecordStore, record_of};

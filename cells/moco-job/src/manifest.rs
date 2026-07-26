@@ -83,6 +83,11 @@ pub struct ProcEntry {
 ///
 /// `cwd` is relative to the workspace root, and empty means the root itself.
 ///
+/// **Quote any argv element containing `@`.** In Styx `@` introduces an enum
+/// variant, so a bare `@MOCO_PORT` or `@notes.txt` is a parse error — this is a
+/// fact about the file format, separate from what the token means. Write
+/// `argv (serve --port "@MOCO_PORT")`.
+///
 /// Quote an argv element that would otherwise read as something else: bare
 /// `true` and `false` parse as booleans, so the `/bin/true` command is
 /// `argv ("true")`. The parser refuses the mismatch rather than coercing, so

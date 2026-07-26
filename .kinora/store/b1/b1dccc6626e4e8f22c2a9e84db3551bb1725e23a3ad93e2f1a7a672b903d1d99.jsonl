@@ -1,0 +1,2 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"store","kind":"markdown","id":"5327a84d051101241db268dea3936825c428281a47f9c0213dd183b18fd70139","hash":"1df2c46d9c335438560a2ca448f8e6d83437cb5f01dd7766b97e7d947b0e842e","parents":["bcca051b379fe4ebef8ec0bfb8b4ecef96827bffcededaccf2881c54e1c19970"],"ts":"2026-07-26T13:53:54.514083438Z","author":"YJ Park","provenance":"kara","metadata":{"name":"process-manager-v1-plan","status::resolved":"false","task::milestone":"v1"}}

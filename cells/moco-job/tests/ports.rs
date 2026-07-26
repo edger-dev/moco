@@ -96,22 +96,38 @@ fn auto_is_sticky_for_the_same_scope_and_name() {
 /// Two different declarations do not collide, even sharing one registry — which
 /// is the case two daemons on one node are in.
 #[test]
-fn two_declarations_get_different_ports() {
+fn two_live_jobs_get_different_ports() {
     let dir = scratch("distinct");
-    let store = RecordStore::open(&dir).expect("store");
-    let a = Scope::workspace("/ws/a");
-    let b = Scope::workspace("/ws/b");
+    let a = workspace(
+        "live-a",
+        r#"proc ({name dev, argv (sleep 30), port @Auto})"#,
+    );
+    let b = workspace(
+        "live-b",
+        r#"proc ({name dev, argv (sleep 30), port @Auto})"#,
+    );
+    let reg = registry_in(&dir);
 
-    let pa = moco_job::port::allocate(&store, range(), &a, Some("dev"), PortRequest::Auto)
-        .expect("a")
-        .expect("port");
-    moco_job::port::remember(&store, &a, "dev", pa).expect("remember");
+    let ja = reg
+        .start_named("dev", &Caller::Scoped(Scope::resolve(&a)))
+        .expect("a");
+    let jb = reg
+        .start_named("dev", &Caller::Scoped(Scope::resolve(&b)))
+        .expect("b");
 
-    let pb = moco_job::port::allocate(&store, range(), &b, Some("dev"), PortRequest::Auto)
-        .expect("b")
-        .expect("port");
+    // Both are *live*, so both reserve — which is the only case where sharing
+    // would actually collide. (A finished job releases its port immediately;
+    // stickiness, not reservation, is what brings it back.)
+    assert_ne!(
+        reg.port_of(&ja),
+        reg.port_of(&jb),
+        "two running servers must not be handed the same port"
+    );
 
-    assert_ne!(pa, pb, "distinct declarations must not share a port");
+    let _ = reg.kill(&ja, &Caller::Console);
+    let _ = reg.kill(&jb, &Caller::Console);
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -210,7 +226,7 @@ fn the_argv_token_is_substituted() {
     let dir = scratch("token-reg");
     let ws = workspace(
         "token",
-        r#"proc ({name srv, argv (echo --port @MOCO_PORT), port @Auto})"#,
+        r#"proc ({name srv, argv (echo --port "@MOCO_PORT"), port @Auto})"#,
     );
     let reg = registry_in(&dir);
     let caller = Caller::Scoped(Scope::resolve(&ws));
@@ -262,7 +278,7 @@ fn the_token_substitutes_within_an_element() {
 fn an_unknown_token_is_refused_at_load() {
     let ws = workspace(
         "typo",
-        r#"proc ({name srv, argv (echo @MOCO_PROT), port @Auto})"#,
+        r#"proc ({name srv, argv (echo "@MOCO_PROT"), port @Auto})"#,
     );
     let err = Manifest::load(&ws).expect_err("a typo must not reach the program");
     let message = err.to_string();
@@ -275,20 +291,18 @@ fn an_unknown_token_is_refused_at_load() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-/// **No shell expansion happens.** `$HOME` written out of habit is refused with
-/// an explanation, rather than passed through as a literal for the program to
-/// choke on.
+/// **`$` is not policed, and must not be.** A job may ship a shell as `argv[0]`
+/// — the hatch `argv-not-shell` grants for a pipeline — and `sh -c "… $MOCO_PORT"`
+/// is then the *correct* way to read the port, since the node injects it into
+/// the environment under that very name. Rejecting it would refuse the intended
+/// usage.
 #[test]
-fn a_shell_style_variable_is_refused_at_load() {
-    let ws = workspace("shell", r#"proc ({name srv, argv (echo $HOME)})"#);
-    let err = Manifest::load(&ws).expect_err("no shell is involved");
-    let message = err.to_string();
-
-    assert!(message.contains("$HOME"), "must name it: {message}");
-    assert!(
-        message.to_lowercase().contains("shell"),
-        "must say why: {message}"
+fn a_shell_wrapper_reading_the_port_variable_is_allowed() {
+    let ws = workspace(
+        "shell",
+        r#"proc ({name srv, argv (sh -c "echo $MOCO_PORT"), port @Auto})"#,
     );
+    Manifest::load(&ws).expect("a shell wrapper reading $MOCO_PORT is correct usage");
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -298,7 +312,7 @@ fn a_shell_style_variable_is_refused_at_load() {
 fn an_unrelated_at_sign_is_left_alone() {
     let ws = workspace(
         "at",
-        r#"proc ({name srv, argv (echo user@host @notes.txt)})"#,
+        r#"proc ({name srv, argv (echo "user@host" "@notes.txt")})"#,
     );
     let manifest = Manifest::load(&ws).expect("an ordinary @ is not a token");
     assert_eq!(

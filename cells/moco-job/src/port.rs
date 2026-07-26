@@ -271,11 +271,20 @@ pub fn substitute(argv: &[String], port: Option<u16>) -> Vec<String> {
         .collect()
 }
 
-/// Check an argv for tokens that will not expand.
+/// Check an argv for node-supplied tokens that will not expand.
 ///
-/// Loud, and at load time. A typo like `@MOCO_PROT` would otherwise reach the
-/// program as a literal argument, and a habitual `$HOME` would too — both
-/// failing far from their cause.
+/// Loud, and at load time: a typo like `@MOCO_PROT` would otherwise reach the
+/// program as a literal argument and fail far from its cause.
+///
+/// **`$` is deliberately not policed.** The spec this implements originally
+/// called any `$`-sequence a config error, on the reasoning that no shell is
+/// involved. Implementing it showed that wrong twice over. A job may ship a
+/// shell as `argv[0]` — the escape hatch `argv-not-shell` explicitly grants for
+/// a pipeline — and there `$` is the shell's business. Worse, `sh -c "… \$MOCO_PORT"`
+/// is the *correct* way for such a job to read the port, because the node
+/// injects it into the environment under exactly that name. A rule that rejects
+/// the intended usage is worse than no rule, so only the `@MOCO_` namespace —
+/// which is unambiguously ours — is checked.
 pub fn validate_tokens(argv: &[String]) -> Result<(), String> {
     for arg in argv {
         if let Some(at) = arg.find(TOKEN_PREFIX) {
@@ -292,14 +301,6 @@ pub fn validate_tokens(argv: &[String]) -> Result<(), String> {
                     KNOWN_TOKENS.join(", ")
                 ));
             }
-        }
-        if let Some(at) = arg.find('$') {
-            let name: String = arg[at..].chars().take(12).collect();
-            return Err(format!(
-                "'{name}' looks like a shell variable, and no shell is involved here — \
-                 argv is passed to the program directly. Node-supplied values use '@', \
-                 e.g. {PORT_TOKEN}."
-            ));
         }
     }
     Ok(())
@@ -326,6 +327,23 @@ mod tests {
     fn an_ordinary_at_sign_is_not_a_token() {
         assert!(validate_tokens(&["user@host".to_string()]).is_ok());
         assert!(validate_tokens(&["@notes.txt".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn a_shell_wrapper_may_use_dollar_variables() {
+        // `sh -c` is the sanctioned escape hatch; there the shell expands, and
+        // refusing `$` would break it.
+        assert!(
+            validate_tokens(&["sh".to_string(), "-c".to_string(), "echo $HOME".to_string()])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_node_value_read_through_a_shell_is_allowed() {
+        // The env var really is named MOCO_PORT, so this is correct usage, not
+        // a mistake to catch.
+        assert!(validate_tokens(&["sh".into(), "-c".into(), "echo $MOCO_PORT".into()]).is_ok());
     }
 
     #[test]
