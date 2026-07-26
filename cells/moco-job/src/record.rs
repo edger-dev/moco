@@ -68,6 +68,10 @@ pub struct JobRecord {
     pub deadline_ms: u64,
     /// Whether its terminal record has already reached the audit.
     pub audited: bool,
+    /// The declared machine-lens sidecar, relative to the job's directory.
+    pub machine_file: String,
+    /// What is in it.
+    pub machine_format: String,
     /// True when this job was **handed over** rather than started here.
     ///
     /// Persisted, so re-adoption preserves it: "we were given this" and "we
@@ -309,6 +313,8 @@ impl RecordStore {
             restart: RestartPolicy::Never,
             restarts: 0,
             port,
+            machine_file: String::new(),
+            machine_format: String::new(),
             external: false,
             pid: 0,
             pid_start: 0,
@@ -343,6 +349,8 @@ pub(crate) fn record_of(
     restart: RestartPolicy,
     restarts: u64,
     port: u16,
+    machine_file: &str,
+    machine_format: &str,
     external: bool,
     pid: u32,
     pid_start: u64,
@@ -362,6 +370,8 @@ pub(crate) fn record_of(
         restart,
         restarts,
         port,
+        machine_file: machine_file.to_string(),
+        machine_format: machine_format.to_string(),
         external,
         pid,
         pid_start,

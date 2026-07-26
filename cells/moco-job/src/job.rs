@@ -128,6 +128,10 @@ pub struct JobRequest {
     pub port: Option<u16>,
     /// The environment variable the port arrives in.
     pub port_env: String,
+    /// The declared machine-lens sidecar, relative to the job's directory.
+    pub machine_file: String,
+    /// What is in it.
+    pub machine_format: String,
     /// Optional execution deadline. A job still running past it lands
     /// `TimedOut` when it is next awaited (`wait` / `run`). v1 has no background
     /// reaper, so a job that is never awaited is not force-expired — a full
@@ -151,6 +155,8 @@ impl JobRequest {
             restart: RestartPolicy::Never,
             port: None,
             port_env: String::new(),
+            machine_file: String::new(),
+            machine_format: String::new(),
         }
     }
 
@@ -175,6 +181,13 @@ impl JobRequest {
     pub fn with_port(mut self, port: u16, env: impl Into<String>) -> Self {
         self.port = Some(port);
         self.port_env = env.into();
+        self
+    }
+
+    /// Declare the sidecar an agent should read instead of scrollback.
+    pub fn with_machine_view(mut self, file: impl Into<String>, format: impl Into<String>) -> Self {
+        self.machine_file = file.into();
+        self.machine_format = format.into();
         self
     }
 

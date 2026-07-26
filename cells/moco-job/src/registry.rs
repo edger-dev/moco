@@ -10,6 +10,7 @@ use crate::admission;
 use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
+use crate::lens::{LensSource, MachineRead};
 use crate::lifecycle::{Lifetime, RestartPolicy};
 use crate::manifest::Manifest;
 use crate::port::{self, PortRange};
@@ -39,6 +40,8 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         handle.restart,
         handle.restarts,
         handle.port,
+        &handle.machine_file,
+        &handle.machine_format,
         handle.external,
         handle.pid,
         handle.pid_start,
@@ -105,6 +108,10 @@ struct JobHandle {
     restarts: u64,
     /// The port the node allocated it, or 0 for none.
     port: u16,
+    /// The declared machine-lens sidecar, relative to the job's directory.
+    machine_file: String,
+    /// What is in it.
+    machine_format: String,
     /// Handed over rather than started here.
     external: bool,
     /// The environment variable the port arrives in.
@@ -406,6 +413,8 @@ impl JobRegistry {
                     restarts: record.restarts,
                     port: record.port,
                     port_env: String::new(),
+                    machine_file: record.machine_file.clone(),
+                    machine_format: record.machine_format.clone(),
                     external: record.external,
                     pid: record.pid,
                     pid_start: record.pid_start,
@@ -543,6 +552,9 @@ impl JobRegistry {
         if let Some(port) = allocated {
             request = request.with_port(port, Manifest::port_env_of(entry));
         }
+        if !entry.machine_file.is_empty() {
+            request = request.with_machine_view(&entry.machine_file, &entry.machine_format);
+        }
         if entry.deadline_ms > 0 {
             request = request.with_deadline(Duration::from_millis(entry.deadline_ms));
         }
@@ -634,6 +646,8 @@ impl JobRegistry {
             restarts: 0,
             port: 0,
             port_env: String::new(),
+            machine_file: String::new(),
+            machine_format: String::new(),
             external: true,
             pid,
             pid_start,
@@ -1092,6 +1106,8 @@ impl JobRegistry {
             restart: req.restart,
             port: req.port,
             port_env: req.port_env.clone(),
+            machine_file: req.machine_file.clone(),
+            machine_format: req.machine_format.clone(),
         };
 
         let mut handle = JobHandle {
@@ -1122,6 +1138,8 @@ impl JobRegistry {
             restarts: 0,
             port: req.port.unwrap_or(0),
             port_env: req.port_env.clone(),
+            machine_file: req.machine_file.clone(),
+            machine_format: req.machine_format.clone(),
             external: false,
             pid: 0,
             pid_start: 0,
@@ -1455,6 +1473,76 @@ impl JobRegistry {
             self.flush(id, record)?;
         }
         Ok(tail)
+    }
+
+    /// Read a job through its **machine lens**.
+    ///
+    /// When a sidecar is declared, this reads that — a few hundred bytes of
+    /// structured answer instead of megabytes of redraw, which is the whole
+    /// reason the lens exists. When one is not, it falls back to scrollback and
+    /// **says so**: handing back raw output labelled as though it were
+    /// structured would be worse than handing back nothing, because a caller
+    /// would try to parse it.
+    ///
+    /// A declared-but-not-yet-written sidecar reads **empty**, not as a
+    /// fallback. The lens was declared, so that is the channel, and "nothing
+    /// yet" is a real answer about it.
+    ///
+    /// implements: dual-lens-human-and-machine
+    pub fn machine(&self, id: &JobId, offset: u64) -> Result<MachineRead, JobError> {
+        let (file, format, cwd) = {
+            let inner = self.locked();
+            let handle = inner
+                .jobs
+                .get(id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
+            (
+                handle.machine_file.clone(),
+                handle.machine_format.clone(),
+                handle.resolved_cwd.clone(),
+            )
+        };
+
+        if file.is_empty() {
+            let tail = self.tail(id, offset)?;
+            return Ok(MachineRead {
+                source: LensSource::Scrollback,
+                format: String::new(),
+                bytes: tail.bytes,
+                next_offset: tail.next_offset,
+            });
+        }
+
+        // The manifest is agent-editable, so a declared path is not a licence to
+        // read anything on the machine: it is resolved within the job's own
+        // directory and refused if it climbs out.
+        let path = cwd.join(&file);
+        let bytes = match path.canonicalize() {
+            Ok(resolved) => {
+                if !resolved.starts_with(&cwd) {
+                    return Err(JobError::CwdEscape {
+                        cwd: resolved.display().to_string(),
+                        root: cwd.display().to_string(),
+                    });
+                }
+                let mut handle = File::open(&resolved).map_err(JobError::Io)?;
+                handle.seek(SeekFrom::Start(offset)).map_err(JobError::Io)?;
+                let mut bytes = Vec::new();
+                handle.read_to_end(&mut bytes).map_err(JobError::Io)?;
+                bytes
+            }
+            // Not written yet. Declared is declared: this is an empty machine
+            // read, not a silent switch to the other channel.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(JobError::Io(e)),
+        };
+
+        Ok(MachineRead {
+            source: LensSource::Machine,
+            format,
+            next_offset: offset + bytes.len() as u64,
+            bytes,
+        })
     }
 
     /// Block until the job is terminal and return its outcome. Resumable after a

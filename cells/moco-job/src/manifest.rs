@@ -75,6 +75,16 @@ pub struct ProcEntry {
     /// checked-in manifest stays usable on every machine.
     #[facet(default)]
     pub hosts: Vec<String>,
+    /// A sidecar this job writes, relative to its working directory, holding a
+    /// machine-readable view of what it found. Empty means none, and a reader
+    /// falls back to scrollback.
+    #[facet(default)]
+    pub machine_file: String,
+    /// What is in that file, so a reader knows how to read it. A label, not a
+    /// parser: the engine never interprets it, which is what keeps "declared,
+    /// never inferred" from turning into a format zoo in here.
+    #[facet(default)]
+    pub machine_format: String,
 }
 
 /// Everything one workspace declares.
@@ -216,6 +226,8 @@ mod tests {
                 port_env: String::new(),
                 worktree: WorktreePolicy::Unset,
                 hosts: Vec::new(),
+                machine_file: String::new(),
+                machine_format: String::new(),
             }],
         };
         let text = facet_styx::to_string(&manifest).expect("encode");

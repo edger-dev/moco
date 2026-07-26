@@ -89,6 +89,22 @@ pub struct TailReply {
     pub status: JobStatus,
 }
 
+/// Read a job through its machine lens.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct MachineRequest {
+    pub id: String,
+    pub offset: u64,
+}
+
+/// The machine view, or scrollback with a label saying so.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct MachineReply {
+    pub source: crate::lens::LensSource,
+    pub format: String,
+    pub bytes: Vec<u8>,
+    pub next_offset: u64,
+}
+
 /// Wait for a job to reach a terminal state.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct WaitRequest {
@@ -295,6 +311,19 @@ pub fn dispatch(
                 },
             )
         }
+        "machine" => {
+            let req: MachineRequest = read(method, request)?;
+            let out = registry.machine(&JobId(req.id), req.offset)?;
+            write(
+                method,
+                &MachineReply {
+                    source: out.source,
+                    format: out.format,
+                    bytes: out.bytes,
+                    next_offset: out.next_offset,
+                },
+            )
+        }
         "wait" => {
             let req: WaitRequest = read(method, request)?;
             let outcome = registry.wait(&JobId(req.id))?;
@@ -371,6 +400,7 @@ pub const METHODS: &[&str] = &[
     "ensure",
     "clear",
     "tail",
+    "machine",
     "wait",
     "kill",
     "list",
