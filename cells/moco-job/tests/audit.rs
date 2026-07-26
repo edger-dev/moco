@@ -30,8 +30,14 @@ fn policy() -> NodePolicy {
     NodePolicy::new(rules, root()).with_approval_timeout(Duration::from_millis(200))
 }
 
+// A construction failure here means the test environment cannot create a
+// registry directory at all — a broken harness, not a behaviour under test.
+#[allow(
+    clippy::unwrap_used,
+    reason = "test helper: a failure is a broken harness"
+)]
 fn governed() -> JobRegistry {
-    JobRegistry::with_policy(policy())
+    JobRegistry::with_policy(policy()).unwrap()
 }
 
 /// A completed job is audited with the authority it ran under.
@@ -169,7 +175,9 @@ fn file_audit_log_is_durable_and_append_only() {
     let _ = std::fs::remove_file(&path);
 
     {
-        let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FileAuditLog::new(&path)));
+        let reg = JobRegistry::with_policy(policy())
+            .unwrap()
+            .with_audit(Arc::new(FileAuditLog::new(&path)));
         reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
         reg.start(JobRequest::new(["echo", "nope"], root()))
             .unwrap();
@@ -191,7 +199,9 @@ fn file_audit_log_is_durable_and_append_only() {
 
     // Appending again preserves what was there.
     {
-        let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FileAuditLog::new(&path)));
+        let reg = JobRegistry::with_policy(policy())
+            .unwrap()
+            .with_audit(Arc::new(FileAuditLog::new(&path)));
         reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
     }
     assert_eq!(
@@ -206,7 +216,7 @@ fn file_audit_log_is_durable_and_append_only() {
 /// A program-not-found error names the binary *and* the PATH that was searched.
 #[test]
 fn spawn_failure_names_the_searched_path() {
-    let reg = JobRegistry::ungoverned();
+    let reg = JobRegistry::ungoverned().unwrap();
     let err = reg
         .start(JobRequest::new(
             ["definitely-not-a-real-program-xyz"],
@@ -249,7 +259,9 @@ impl AuditSink for FailingAuditLog {
 /// silent history loss.
 #[test]
 fn failed_audit_write_is_not_silently_swallowed() {
-    let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FailingAuditLog));
+    let reg = JobRegistry::with_policy(policy())
+        .unwrap()
+        .with_audit(Arc::new(FailingAuditLog));
     let id = reg.start(JobRequest::new(["echo", "ok"], root())).unwrap();
 
     let first = reg.wait(&id);
@@ -301,6 +313,7 @@ fn hostile_argv_round_trips_as_one_line() {
         });
         {
             let reg = JobRegistry::with_policy(NodePolicy::new(rules, root()))
+                .unwrap()
                 .with_audit(Arc::new(FileAuditLog::new(&path)));
             reg.run(JobRequest::new(["echo", *value], root())).unwrap();
         }
@@ -365,8 +378,7 @@ fn all_status_and_verdict_shapes_round_trip() {
     for status in &statuses {
         for verdict in &verdicts {
             let rec = AuditRecord::new(
-                "test-registry",
-                1,
+                "test-job-1",
                 argv(&["echo", "x"]),
                 root(),
                 *verdict,
@@ -390,7 +402,7 @@ fn all_status_and_verdict_shapes_round_trip() {
 /// A killed job and a timed-out job are both recorded.
 #[test]
 fn killed_and_timed_out_jobs_are_audited() {
-    let reg = JobRegistry::ungoverned();
+    let reg = JobRegistry::ungoverned().unwrap();
 
     let killed = reg.start(JobRequest::new(["sleep", "10"], root())).unwrap();
     reg.kill(&killed).unwrap();
@@ -429,7 +441,7 @@ fn cwd_escape_attempt_is_recorded() {
 /// caller never gets an id to await.
 #[test]
 fn unstartable_attempt_is_recorded_as_failed() {
-    let reg = JobRegistry::ungoverned();
+    let reg = JobRegistry::ungoverned().unwrap();
     let err = reg
         .start(JobRequest::new(
             ["definitely-not-a-real-program-xyz"],
@@ -447,24 +459,33 @@ fn unstartable_attempt_is_recorded_as_failed() {
     );
 }
 
-/// Records carry a registry identity, so two registries sharing one log file
-/// do not both claim job 0.
+/// A job id is node-unique, so two registries sharing one log file produce
+/// records that are distinguishable **by the id itself** — no second
+/// discriminator field is needed.
+///
+/// This used to assert the opposite: ids were per-registry counters, so both
+/// records claimed "job 0" and a separate `registry` field told them apart.
+/// Making the id node-unique removed the need for that field, and with it the
+/// second answer to "what identifies a job".
+///
+/// implements: registry-is-node-state-on-disk
 #[test]
-fn records_identify_their_registry() {
+fn records_from_two_registries_carry_distinct_job_ids() {
     let path = std::env::temp_dir().join(format!("moco-audit-reg-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
     for _ in 0..2 {
-        let reg = JobRegistry::with_policy(policy()).with_audit(Arc::new(FileAuditLog::new(&path)));
+        let reg = JobRegistry::with_policy(policy())
+            .unwrap()
+            .with_audit(Arc::new(FileAuditLog::new(&path)));
         reg.run(JobRequest::new(["echo", "ok"], root())).unwrap();
     }
 
     let records = FileAuditLog::new(&path).records().unwrap();
     assert_eq!(records.len(), 2);
-    assert_eq!(records[0].job, records[1].job, "both are job 0 locally");
     assert_ne!(
-        records[0].registry, records[1].registry,
-        "but they must be distinguishable"
+        records[0].job, records[1].job,
+        "two registries must never issue the same job id"
     );
 
     let _ = std::fs::remove_file(&path);

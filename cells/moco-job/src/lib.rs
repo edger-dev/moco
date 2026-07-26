@@ -11,6 +11,8 @@ pub mod audit;
 pub mod error;
 pub mod job;
 pub mod preflight;
+pub mod procfs;
+pub mod record;
 pub mod registry;
 pub mod rules;
 
@@ -18,6 +20,8 @@ pub use audit::{AuditRecord, AuditSink, FileAuditLog, MemoryAuditLog, Verdict};
 pub use error::JobError;
 pub use job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
 pub use preflight::Preflight;
+pub use procfs::{Liveness, liveness};
+pub use record::{JobRecord, RecordStore};
 pub use registry::JobRegistry;
 pub use rules::{Decision, Disposition, NodePolicy, RuleSet, SeedConfig};
 

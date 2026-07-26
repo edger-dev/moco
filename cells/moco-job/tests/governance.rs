@@ -36,8 +36,14 @@ fn policy() -> NodePolicy {
     NodePolicy::new(rules, root()).with_approval_timeout(Duration::from_millis(200))
 }
 
+// A construction failure here means the test environment cannot create a
+// registry directory at all — a broken harness, not a behaviour under test.
+#[allow(
+    clippy::unwrap_used,
+    reason = "test helper: a failure is a broken harness"
+)]
 fn governed() -> JobRegistry {
-    JobRegistry::with_policy(policy())
+    JobRegistry::with_policy(policy()).unwrap()
 }
 
 /// An argv a seed rule allows spawns and runs to completion.
@@ -196,7 +202,7 @@ fn preflight_reports_disposition_without_running() {
 
     // Nothing was queued: an id that would exist if preflight registered a job
     // must not be there.
-    assert!(reg.wait(&moco_job::JobId(0)).is_err());
+    assert!(reg.wait(&moco_job::JobId::new("no-such-job")).is_err());
 }
 
 /// Preflight resolves `argv[0]` on PATH and reports the effective PATH.
@@ -262,7 +268,7 @@ deny (
 /// An ungoverned registry (no policy) runs without a gate — the bare substrate.
 #[test]
 fn ungoverned_registry_has_no_gate() {
-    let reg = JobRegistry::ungoverned();
+    let reg = JobRegistry::ungoverned().unwrap();
     assert!(reg.policy().is_none());
     let outcome = reg
         .run(JobRequest::new(["echo", "ungoverned"], root()))
@@ -287,7 +293,7 @@ fn shell_metacharacters_are_inert() {
         allow: vec![vec!["echo".to_string(), payload.clone()]],
         deny: vec![],
     });
-    let reg = JobRegistry::with_policy(NodePolicy::new(rules, root()));
+    let reg = JobRegistry::with_policy(NodePolicy::new(rules, root())).unwrap();
 
     let id = reg
         .start(JobRequest::new(["echo", payload.as_str()], root()))
@@ -316,7 +322,7 @@ fn sibling_prefix_directory_is_not_contained() {
     std::fs::create_dir_all(&allowed).unwrap();
     std::fs::create_dir_all(&sibling).unwrap();
 
-    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed));
+    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed)).unwrap();
     let err = reg
         .start(JobRequest::new(["echo", "ok"], &sibling))
         .unwrap_err();
@@ -332,7 +338,7 @@ fn dotdot_escape_is_rejected() {
     let allowed = base.join("inner");
     std::fs::create_dir_all(&allowed).unwrap();
 
-    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed));
+    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed)).unwrap();
     let err = reg
         .start(JobRequest::new(["echo", "ok"], allowed.join("..")))
         .unwrap_err();
@@ -354,7 +360,7 @@ fn symlink_escape_is_rejected() {
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&outside, &link).unwrap();
 
-    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed));
+    let reg = JobRegistry::with_policy(NodePolicy::new(RuleSet::default(), &allowed)).unwrap();
     let err = reg
         .start(JobRequest::new(["echo", "ok"], &link))
         .unwrap_err();

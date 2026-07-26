@@ -47,13 +47,12 @@ impl Verdict {
 /// implements: audit-every-attempt
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct AuditRecord {
-    /// Which registry instance produced this record. A `job` id is only unique
-    /// within its registry (each counts from 0), so a shared log needs this to
-    /// tell two registries' job 0 apart. Process-id plus a per-process sequence,
-    /// so it is unique for the life of a host between pid reuse.
-    pub registry: String,
-    /// The registry-local job id.
-    pub job: u64,
+    /// The job's id — **node-unique**, so a log shared by two daemons needs no
+    /// second field to tell their records apart. (It once did: while ids were
+    /// per-registry counters, every registry had a job 0 and records carried a
+    /// separate registry discriminator. Making the id itself node-unique
+    /// removed the need, and with it a second answer to "what identifies a job".)
+    pub job: String,
     /// Exactly the argv that ran (or would have run) — never a shell string, so
     /// the record is unambiguous.
     pub argv: Vec<String>,
@@ -69,16 +68,14 @@ pub struct AuditRecord {
 
 impl AuditRecord {
     pub fn new(
-        registry: impl Into<String>,
-        job: u64,
+        job: impl Into<String>,
         argv: Vec<String>,
         cwd: PathBuf,
         verdict: Verdict,
         status: JobStatus,
     ) -> Self {
         Self {
-            registry: registry.into(),
-            job,
+            job: job.into(),
             argv,
             // Lossless: a job's cwd is validated as UTF-8 when it is confined,
             // so this never silently substitutes replacement characters for a
@@ -187,7 +184,7 @@ impl FileAuditLog {
 /// let a caller forge records). Escaping before serialization keeps every record
 /// exactly one line whatever the payload; `unescape_field` restores the value
 /// byte-for-byte, so fidelity is preserved.
-fn escape_field(s: &str) -> String {
+pub(crate) fn escape_field(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
@@ -195,7 +192,7 @@ fn escape_field(s: &str) -> String {
 
 /// Reverse `escape_field`, left to right so `\\n` reads back as a literal
 /// backslash followed by `n`, not as a newline.
-fn unescape_field(s: &str) -> String {
+pub(crate) fn unescape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -220,8 +217,7 @@ fn unescape_field(s: &str) -> String {
 impl AuditRecord {
     fn escaped(&self) -> Self {
         Self {
-            registry: self.registry.clone(),
-            job: self.job,
+            job: self.job.clone(),
             argv: self.argv.iter().map(|a| escape_field(a)).collect(),
             cwd: escape_field(&self.cwd),
             verdict: self.verdict,

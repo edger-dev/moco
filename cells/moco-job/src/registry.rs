@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -11,30 +10,42 @@ use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
 use crate::preflight::Preflight;
+use crate::procfs::{self, Liveness};
+use crate::record::{RecordStore, record_of};
 use crate::rules::{Decision, Disposition, NodePolicy};
+
+/// Write a job's current state to its durable record.
+///
+/// Called at every transition, so a daemon that dies at any point leaves a
+/// record a successor can act on. Writes are atomic, so there is no torn state
+/// to recover from.
+///
+/// implements: registry-is-node-state-on-disk
+fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), JobError> {
+    store.put(&record_of(
+        id,
+        &handle.argv,
+        &handle.resolved_cwd,
+        handle.verdict,
+        &handle.status,
+        handle.pid,
+        handle.pid_start,
+        &handle.capture,
+        handle.deadline.map(|d| d.as_millis() as u64).unwrap_or(0),
+        handle.audited,
+    ))
+}
 
 /// How often `wait` polls a running child for exit / deadline / decision.
 const POLL: Duration = Duration::from_millis(10);
 
-/// Process-global sequence, used to name the per-registry capture directory.
-static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Process-global sequence identifying each registry instance, so records from
-/// two registries sharing one log file can be told apart.
-static REGISTRY_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// A registry identity that is unique for this host between pid reuse.
-fn new_registry_id() -> String {
-    format!(
-        "{}-{}",
-        std::process::id(),
-        REGISTRY_SEQ.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 /// The live bookkeeping for one job.
 struct JobHandle {
     /// The running child, taken once the job reaches a terminal state.
+    ///
+    /// `None` with a `Running` status means the job was **re-adopted**: it is
+    /// alive but is no longer our child, so it is tracked by liveness probe
+    /// rather than by `try_wait`.
     child: Option<Child>,
     /// Path of the file its stdout+stderr are captured to. Kept for cleanup;
     /// output is always read and written through the handles below, never by
@@ -65,66 +76,40 @@ struct JobHandle {
     /// Set once its terminal record has been written, so no attempt is audited
     /// twice however many times it is awaited.
     audited: bool,
+    /// The child's pid, or 0 if it never spawned.
+    pid: u32,
+    /// The kernel start time of `pid`, so a **reused** pid is never mistaken for
+    /// this job. 0 when unknown.
+    pid_start: u64,
+    /// True when this handle was rebuilt from an on-disk record rather than
+    /// spawned by this registry: we hold no child handle, so there is no exit
+    /// code to reap and its end is reported `OutcomeUnknown`.
+    adopted: bool,
 }
 
-#[derive(Default)]
 struct Inner {
-    next_id: u64,
-    // v1: jobs are retained for the registry's lifetime (no eviction yet). Their
-    // capture files and any unreaped children are released on JobHandle drop.
+    // Jobs are retained for the registry's lifetime (no eviction yet); their
+    // durable records and captures outlive it entirely.
     jobs: HashMap<JobId, JobHandle>,
-    /// The private 0700 directory holding this registry's capture files,
-    /// created on first use.
-    capture_dir: Option<PathBuf>,
+    /// The on-disk home of this registry's records and captures.
+    store: RecordStore,
 }
 
 impl Drop for JobHandle {
+    /// **A daemon going away must not kill a job.**
+    ///
+    /// Reap a child that has *already* exited so teardown leaves no zombie, but
+    /// never signal a live one and never delete the capture: the whole point of
+    /// the durable registry is that a job outlives the process that started it,
+    /// and its scrollback is that file. Only an explicit stop signals.
+    ///
+    /// implements: registry-is-node-state-on-disk
+    /// implements: job-durability-both-kill-vectors
     fn drop(&mut self) {
-        // Reap a still-running child so teardown leaves no zombie, then remove
-        // the file-backed capture. For a job already waited to a terminal state
-        // `child` is None, so this just deletes the file.
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        let _ = std::fs::remove_file(&self.capture);
-    }
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        if let Some(dir) = self.capture_dir.take() {
-            let _ = std::fs::remove_dir_all(dir);
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.try_wait();
         }
     }
-}
-
-/// Create this registry's private capture directory.
-///
-/// Captures must not live directly in a world-writable temp dir: a job running
-/// as the daemon's own uid could pre-create a predictable capture path as a
-/// symlink and have the daemon truncate and write through it. A fresh
-/// owner-only directory plus `create_new` on every capture closes that.
-fn make_capture_dir() -> Result<PathBuf, JobError> {
-    let dir = std::env::temp_dir().join(format!(
-        "moco-job-{}-{}",
-        std::process::id(),
-        CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        // mode at creation, not a later chmod: no window where it is group/world readable.
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .map_err(JobError::Io)?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir(&dir).map_err(JobError::Io)?;
-    }
-    Ok(dir)
 }
 
 /// Resolve `cwd` to an absolute, symlink-resolved path confined within `root`.
@@ -259,38 +244,140 @@ pub struct JobRegistry {
     /// Where terminal records are appended. Always present, so every registry
     /// has a history even when no durable sink was configured.
     audit: Arc<dyn AuditSink>,
-    /// This registry's identity, stamped on every record it writes.
-    registry_id: String,
 }
 
 impl JobRegistry {
     /// An **ungoverned** registry — the bare substrate, no rule-set in front,
     /// for a trusted local caller (e.g. supervised dev processes).
-    pub fn ungoverned() -> Self {
-        Self {
-            inner: Mutex::new(Inner::default()),
+    ///
+    /// Its state lands in a fresh private directory under the node's runtime
+    /// root. Use [`JobRegistry::with_dir`] to point it at a shared node
+    /// directory and re-adopt what is already there.
+    pub fn ungoverned() -> Result<Self, JobError> {
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                jobs: HashMap::new(),
+                store: RecordStore::private()?,
+            }),
             policy: None,
             audit: Arc::new(MemoryAuditLog::new()),
-            registry_id: new_registry_id(),
-        }
+        })
     }
 
     /// A registry governed by `policy`: every `start` is gated before it spawns.
     ///
     /// implements: governed-command-is-a-job
-    pub fn with_policy(policy: NodePolicy) -> Self {
-        Self {
-            inner: Mutex::new(Inner::default()),
+    pub fn with_policy(policy: NodePolicy) -> Result<Self, JobError> {
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                jobs: HashMap::new(),
+                store: RecordStore::private()?,
+            }),
             policy: Some(policy),
             audit: Arc::new(MemoryAuditLog::new()),
-            registry_id: new_registry_id(),
+        })
+    }
+
+    /// Point this registry at a node's shared job directory, **re-adopting**
+    /// every live job already recorded there.
+    ///
+    /// This is how a restarted daemon picks up the jobs its predecessor started:
+    /// the records say what ran and with which `(pid, start-time)`, and a
+    /// liveness probe decides which are still running. A job whose process is
+    /// gone settles `OutcomeUnknown` — we are not its parent, so there is no
+    /// exit code to collect and inventing one would be worse than saying so.
+    ///
+    /// implements: registry-is-node-state-on-disk
+    pub fn with_dir(mut self, dir: impl Into<PathBuf>) -> Result<Self, JobError> {
+        let store = RecordStore::open(dir)?;
+        let mut jobs = HashMap::new();
+
+        for record in store.all()? {
+            let id = JobId(record.id.clone());
+            let capture = PathBuf::from(&record.capture);
+            // Re-open the capture so `tail` keeps working across the restart;
+            // the scrollback *is* this file.
+            let capture_write = File::options()
+                .create(true)
+                .append(true)
+                .open(&capture)
+                .map_err(JobError::Io)?;
+            let capture_read = File::open(&capture).map_err(JobError::Io)?;
+
+            // Only a job recorded as running can still be live; anything else
+            // already reached its terminal state and keeps it.
+            let status = if record.status == JobStatus::Running {
+                match procfs::liveness(record.pid, record.pid_start) {
+                    Liveness::Alive => JobStatus::Running,
+                    // Gone, pid reused, or unprobeable: either way we cannot
+                    // claim it is running and cannot know how it ended.
+                    Liveness::Dead | Liveness::Unsupported => JobStatus::OutcomeUnknown,
+                }
+            } else {
+                record.status.clone()
+            };
+
+            jobs.insert(
+                id,
+                JobHandle {
+                    child: None,
+                    capture,
+                    capture_write,
+                    capture_read,
+                    status,
+                    deadline: (record.deadline_ms > 0)
+                        .then(|| Duration::from_millis(record.deadline_ms)),
+                    started: Instant::now(),
+                    killed: false,
+                    pending: None,
+                    verdict: record.verdict,
+                    resolved_cwd: PathBuf::from(&record.cwd),
+                    argv: record.argv.clone(),
+                    audited: record.audited,
+                    pid: record.pid,
+                    pid_start: record.pid_start,
+                    adopted: true,
+                },
+            );
         }
+
+        let mut inner = Inner { jobs, store };
+        // Persist any status the probe just settled, so a second daemon opening
+        // the same directory sees the resolved state rather than re-probing a
+        // pid that is now free to be reused by something else.
+        let ids: Vec<JobId> = inner.jobs.keys().cloned().collect();
+        for id in ids {
+            let _ = persist(&inner.store, &id, &inner.jobs[&id]);
+        }
+        inner.jobs.shrink_to_fit();
+
+        // Field assignment rather than a struct update: `JobRegistry` implements
+        // `Drop`, so it cannot be moved out of.
+        self.inner = Mutex::new(inner);
+        Ok(self)
     }
 
     /// Send this registry's audit records to a durable sink.
     pub fn with_audit(mut self, sink: Arc<dyn AuditSink>) -> Self {
         self.audit = sink;
         self
+    }
+
+    /// Every job this registry knows about, in creation order.
+    pub fn list(&self) -> Vec<(JobId, JobStatus)> {
+        let inner = self.locked();
+        let mut out: Vec<(JobId, JobStatus)> = inner
+            .jobs
+            .iter()
+            .map(|(id, handle)| (id.clone(), handle.status.clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// The directory this registry's durable state lives in.
+    pub fn dir(&self) -> PathBuf {
+        self.locked().store.dir().to_path_buf()
     }
 
     /// The audit history, for read-only introspection: what worked, what got
@@ -343,8 +430,7 @@ impl JobRegistry {
         }
         handle.audited = true;
         Some(AuditRecord::new(
-            self.registry_id.clone(),
-            id.0,
+            id.0.clone(),
             handle.argv.clone(),
             handle.resolved_cwd.clone(),
             handle.verdict,
@@ -378,15 +464,21 @@ impl JobRegistry {
     ///
     /// implements: audit-every-attempt
     fn record_rejected(&self, argv: &[String], cwd: &Path, verdict: Verdict, status: JobStatus) {
-        let job = {
-            let mut inner = self.locked();
-            let job = inner.next_id;
-            inner.next_id += 1;
-            job
+        // Mint a real id even though no job survives: the audit's identifier
+        // must mean the same thing on every line. If minting fails there is
+        // nowhere to put the record, so the attempt is lost rather than
+        // mislabelled — the caller is already returning the rejection error.
+        let inner = self.locked();
+        let Ok(id) = inner.store.mint() else {
+            return;
         };
+        // The rejection never becomes a job, so release the id claim rather than
+        // leaving an empty record file behind for it. The audit keeps the id.
+        let _ = inner.store.remove(&id.0);
+        drop(inner);
+
         let _ = self.audit.append(AuditRecord::new(
-            self.registry_id.clone(),
-            job,
+            id.0,
             argv.to_vec(),
             cwd.to_path_buf(),
             verdict,
@@ -468,10 +560,11 @@ impl JobRegistry {
         let disposition = self.disposition(&req.argv);
 
         let mut inner = self.locked();
-        let id = JobId(inner.next_id);
-        inner.next_id += 1;
+        // Minting claims the id on disk, so two daemons sharing this directory
+        // can never hand out the same one.
+        let id = inner.store.mint()?;
 
-        let (capture, capture_write, capture_read) = Self::create_capture(&mut inner, id.0)?;
+        let (capture, capture_write, capture_read) = Self::create_capture(&inner, &id)?;
 
         let request = JobRequest {
             argv: req.argv,
@@ -500,12 +593,19 @@ impl JobRegistry {
             resolved_cwd: request.cwd.clone(),
             argv: request.argv.clone(),
             audited: false,
+            pid: 0,
+            pid_start: 0,
+            adopted: false,
         };
 
         match disposition {
             Disposition::Allow => {
                 match spawn_child(&request.argv, &request.cwd, &handle.capture_write) {
                     Ok(child) => {
+                        handle.pid = child.id();
+                        // Recorded at spawn: this is what makes a later probe
+                        // able to tell this process from a reused pid.
+                        handle.pid_start = procfs::start_time(handle.pid).unwrap_or(0);
                         handle.child = Some(child);
                         handle.status = JobStatus::Running;
                         handle.started = Instant::now();
@@ -517,6 +617,10 @@ impl JobRegistry {
                             error: e.to_string(),
                         };
                         let _ = self.record(&id, &mut handle);
+                        // Leave a real record behind, not the empty file that
+                        // minting the id created: an id claim with no record is
+                        // state nobody can read.
+                        let _ = persist(&inner.store, &id, &handle);
                         return Err(e);
                     }
                 }
@@ -537,6 +641,10 @@ impl JobRegistry {
         if handle.status.is_terminal() {
             self.record(&id, &mut handle)?;
         }
+
+        // Durable before the id is returned: a caller holding an id must never
+        // find that the daemon died before the job it names was written down.
+        persist(&inner.store, &id, &handle)?;
 
         inner.jobs.insert(id.clone(), handle);
         Ok(id)
@@ -564,18 +672,10 @@ impl JobRegistry {
         }
     }
 
-    /// Create a capture file inside this registry's private directory, opened
-    /// with `create_new` so an existing path (a planted symlink) is refused.
-    fn create_capture(inner: &mut Inner, job: u64) -> Result<(PathBuf, File, File), JobError> {
-        let dir = match &inner.capture_dir {
-            Some(dir) => dir.clone(),
-            None => {
-                let dir = make_capture_dir()?;
-                inner.capture_dir = Some(dir.clone());
-                dir
-            }
-        };
-        let path = dir.join(format!("{job}.log"));
+    /// Create a capture file inside this registry's directory, opened with
+    /// `create_new` so an existing path (a planted symlink) is refused.
+    fn create_capture(inner: &Inner, job: &JobId) -> Result<(PathBuf, File, File), JobError> {
+        let path = inner.store.capture_path(&job.0);
         let write = File::options()
             .create_new(true)
             .append(true)
@@ -605,8 +705,10 @@ impl JobRegistry {
         let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
 
         let mut inner = self.locked();
-        let handle = inner
-            .jobs
+        // Split the borrow so the durable record can be written while the live
+        // handle is still held: they are disjoint fields of `Inner`.
+        let Inner { jobs, store } = &mut *inner;
+        let handle = jobs
             .get_mut(id)
             .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
@@ -621,7 +723,9 @@ impl JobRegistry {
             };
             handle.verdict = Verdict::NoApprover;
             handle.pending = None;
-            return self.record(id, handle);
+            let recorded = self.record(id, handle);
+            let _ = persist(store, id, handle);
+            return recorded;
         }
 
         if edited_disposition == Some(Disposition::Deny) {
@@ -630,7 +734,9 @@ impl JobRegistry {
             };
             handle.verdict = Verdict::SeedDeny;
             handle.pending = None;
-            return self.record(id, handle);
+            let recorded = self.record(id, handle);
+            let _ = persist(store, id, handle);
+            return recorded;
         }
 
         let request = handle
@@ -644,7 +750,9 @@ impl JobRegistry {
                     reason: DeniedReason::Decision,
                 };
                 handle.verdict = Verdict::RejectedOnce;
-                return self.record(id, handle);
+                let recorded = self.record(id, handle);
+                let _ = persist(store, id, handle);
+                return recorded;
             }
             Decision::AllowOnce { edited_argv } => {
                 // An edited argv is the correction back-channel: it, not the
@@ -670,6 +778,8 @@ impl JobRegistry {
                 };
                 match spawn_child(&argv, &cwd, &handle.capture_write) {
                     Ok(child) => {
+                        handle.pid = child.id();
+                        handle.pid_start = procfs::start_time(handle.pid).unwrap_or(0);
                         handle.child = Some(child);
                         handle.status = JobStatus::Running;
                         // The approval is the authority, and the argv that ran
@@ -690,11 +800,13 @@ impl JobRegistry {
                         };
                         handle.verdict = Verdict::RejectedOnce;
                         let _ = self.record(id, handle);
+                        let _ = persist(store, id, handle);
                         return Err(e);
                     }
                 }
             }
         }
+        let _ = persist(store, id, handle);
         Ok(())
     }
 
@@ -738,13 +850,27 @@ impl JobRegistry {
             {
                 let mut inner = self.locked();
                 let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
-                let handle = inner
-                    .jobs
+                let Inner { jobs, store } = &mut *inner;
+                let handle = jobs
                     .get_mut(id)
                     .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
                 if handle.status.is_terminal() {
                     settled = Some((outcome_of(handle), self.claim(id, handle)));
+                }
+
+                // A re-adopted job is not our child: `try_wait` cannot reap it,
+                // so all we can do is ask whether the same process is still
+                // there. When it is gone we cannot know *how* it ended.
+                if !handle.status.is_terminal() && handle.adopted {
+                    match procfs::liveness(handle.pid, handle.pid_start) {
+                        Liveness::Alive => {}
+                        Liveness::Dead | Liveness::Unsupported => {
+                            handle.status = JobStatus::OutcomeUnknown;
+                            let _ = persist(store, id, handle);
+                            settled = Some((outcome_of(handle), self.claim(id, handle)));
+                        }
+                    }
                 }
 
                 // Fail closed: nobody decided in time.
@@ -755,6 +881,7 @@ impl JobRegistry {
                         reason: DeniedReason::NoApprover,
                     };
                     handle.pending = None;
+                    let _ = persist(store, id, handle);
                     settled = Some((outcome_of(handle), self.claim(id, handle)));
                 } else if let Some(child) = handle.child.as_mut() {
                     // Check for a real exit first: a job that finished on its own
@@ -769,12 +896,14 @@ impl JobRegistry {
                             }
                         };
                         handle.child = None;
+                        let _ = persist(store, id, handle);
                         settled = Some((outcome_of(handle), self.claim(id, handle)));
                     } else if handle
                         .deadline
                         .is_some_and(|dl| handle.started.elapsed() >= dl)
                     {
                         handle.status = JobStatus::TimedOut;
+                        let _ = persist(store, id, handle);
                         if let Some(child) = handle.child.take() {
                             expired = Some((child, outcome_of(handle)));
                         }
@@ -813,8 +942,8 @@ impl JobRegistry {
     /// pending until the approval timeout.
     pub fn kill(&self, id: &JobId) -> Result<(), JobError> {
         let mut inner = self.locked();
-        let handle = inner
-            .jobs
+        let Inner { jobs, store } = &mut *inner;
+        let handle = jobs
             .get_mut(id)
             .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
@@ -824,7 +953,9 @@ impl JobRegistry {
             };
             handle.verdict = Verdict::RejectedOnce;
             handle.pending = None;
-            return self.record(id, handle);
+            let recorded = self.record(id, handle);
+            let _ = persist(store, id, handle);
+            return recorded;
         }
 
         // Record operator intent regardless of the signal's result: `killed`
@@ -833,6 +964,7 @@ impl JobRegistry {
         if let Some(child) = handle.child.as_mut() {
             handle.killed = true;
             let _ = child.kill();
+            let _ = persist(store, id, handle);
         }
         Ok(())
     }
@@ -871,28 +1003,38 @@ impl Drop for JobRegistry {
             .map(|(id, _)| id.clone())
             .collect();
 
+        let Inner { jobs, store } = &mut *inner;
         for id in ids {
-            let Some(handle) = inner.jobs.get_mut(&id) else {
+            let Some(handle) = jobs.get_mut(&id) else {
                 continue;
             };
             if !handle.status.is_terminal() {
-                // Resolve the honest terminal state: a real exit code if the
-                // child finished on its own, otherwise it dies with us.
-                handle.status = match handle
+                // A job still running does **not** end because we are going
+                // away — that is the whole point of the durable registry. Only
+                // a child that has already exited on its own has a terminal
+                // state to write; everything else stays `Running` on disk for a
+                // successor to re-adopt.
+                match handle
                     .child
                     .as_mut()
                     .and_then(|c| c.try_wait().ok())
                     .flatten()
                 {
-                    Some(exit) if !handle.killed => JobStatus::Done {
-                        code: exit.code().unwrap_or(-1),
-                    },
-                    _ => JobStatus::Killed,
-                };
+                    Some(exit) if !handle.killed => {
+                        handle.status = JobStatus::Done {
+                            code: exit.code().unwrap_or(-1),
+                        };
+                    }
+                    Some(_) => handle.status = JobStatus::Killed,
+                    None => {
+                        // Alive and outliving us: leave the record as-is.
+                        let _ = persist(store, &id, handle);
+                        continue;
+                    }
+                }
             }
             let record = AuditRecord::new(
-                self.registry_id.clone(),
-                id.0,
+                id.0.clone(),
                 handle.argv.clone(),
                 handle.resolved_cwd.clone(),
                 handle.verdict,
@@ -901,6 +1043,7 @@ impl Drop for JobRegistry {
             if self.audit.append(record).is_ok() {
                 handle.audited = true;
             }
+            let _ = persist(store, &id, handle);
         }
     }
 }

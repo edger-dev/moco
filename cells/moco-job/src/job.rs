@@ -6,16 +6,33 @@ use facet::Facet;
 
 use crate::audit::Verdict;
 
-/// A job's identity — registry-assigned, unique, and addressable across a
-/// disconnect. The load-bearing first property of a job.
+/// A job's identity — registry-assigned, addressable across a disconnect, and
+/// **node-unique**: stable across a restart of the daemon that created it, and
+/// non-colliding between two daemons sharing one registry directory. A
+/// per-process counter is not a job id.
+///
+/// The value is opaque; only its uniqueness is contracted. It is minted by the
+/// registry, which resolves any collision by exclusive file creation, so
+/// uniqueness does not rest on the clock or on pid non-reuse alone.
 ///
 /// implements: job-is-the-unit-not-rpc
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct JobId(pub u64);
+/// implements: registry-is-node-state-on-disk
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct JobId(pub String);
+
+impl JobId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl fmt::Display for JobId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "job-{}", self.0)
+        f.write_str(&self.0)
     }
 }
 
@@ -64,6 +81,17 @@ pub enum JobStatus {
     Denied {
         reason: DeniedReason,
     },
+    /// The job ended, but the daemon that owns it now cannot say how.
+    ///
+    /// This is the honest terminal state of a **re-adopted** job: it is no
+    /// longer our child, so there is no exit code to reap — only the fact that
+    /// its pid is gone. Reported truthfully rather than fabricating a code or
+    /// losing the job. The degraded mode is transient: one restart makes the job
+    /// our child again and full fidelity returns.
+    ///
+    /// implements: registry-is-node-state-on-disk
+    /// implements: job-durability-both-kill-vectors
+    OutcomeUnknown,
 }
 
 impl JobStatus {
