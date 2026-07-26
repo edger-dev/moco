@@ -35,6 +35,7 @@ fn start_and_wait_round_trip_over_bytes() {
         argv: vec!["echo".into(), "hello".into()],
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
+        caller: wire::WireCaller::Console,
     })
     .expect("encode start");
 
@@ -65,6 +66,7 @@ fn tail_returns_the_bytes_the_process_wrote() {
         argv: vec!["echo".into(), "hello".into()],
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
+        caller: wire::WireCaller::Console,
     })
     .expect("encode");
     let started: wire::StartReply =
@@ -139,6 +141,7 @@ fn an_unstartable_program_fails_across_the_wire() {
         argv: vec!["definitely-not-a-real-program-xyz".into()],
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
+        caller: wire::WireCaller::Console,
     })
     .expect("encode");
 
@@ -161,6 +164,7 @@ fn tail_settles_a_finished_job_without_a_separate_wait() {
         argv: vec!["echo".into(), "done".into()],
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
+        caller: wire::WireCaller::Console,
     })
     .expect("encode");
     let started: wire::StartReply =

@@ -22,6 +22,34 @@ use facet::Facet;
 use crate::error::JobError;
 use crate::job::{JobId, JobRequest, JobStatus};
 use crate::registry::JobRegistry;
+use crate::scope::{Caller, Scope};
+
+/// Who is asking, on the wire.
+///
+/// The caller sends **where it is**, not what that means: turning a directory
+/// into a workspace is the engine's rule, and a second caller would need the
+/// same one. `Console` is spelled out rather than implied by an absent field,
+/// so global authority is always something a caller claimed.
+///
+/// implements: reads-global-writes-own-workspace
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WireCaller {
+    /// A session, identified by the directory it is running in.
+    Session { cwd: String },
+    /// The human console, acting globally.
+    Console,
+}
+
+impl WireCaller {
+    /// Resolve to the engine's notion of a caller.
+    pub fn resolve(&self) -> Caller {
+        match self {
+            WireCaller::Session { cwd } => Caller::Scoped(Scope::resolve(cwd)),
+            WireCaller::Console => Caller::Console,
+        }
+    }
+}
 
 /// Start a job.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
@@ -30,6 +58,8 @@ pub struct StartRequest {
     pub cwd: String,
     /// Execution deadline in milliseconds; 0 means unbounded.
     pub deadline_ms: u64,
+    /// Who is asking. The job is owned by that caller's workspace.
+    pub caller: WireCaller,
 }
 
 /// The id a started job was given.
@@ -77,6 +107,8 @@ pub struct WaitReply {
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct KillRequest {
     pub id: String,
+    /// Who is asking. A job owned by another workspace is refused.
+    pub caller: WireCaller,
 }
 
 /// Acknowledgement that a kill was requested.
@@ -86,10 +118,14 @@ pub struct KillReply {
 }
 
 /// One job in a listing.
+///
+/// Carries its owner: reads are node-global, so a listing shows other
+/// workspaces' jobs, and a caller needs to see which are its own.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct JobSummary {
     pub id: String,
     pub status: JobStatus,
+    pub scope: Scope,
 }
 
 /// Every job this registry knows about.
@@ -188,6 +224,12 @@ pub fn dispatch(
             if req.deadline_ms > 0 {
                 job = job.with_deadline(Duration::from_millis(req.deadline_ms));
             }
+            // The job belongs to the caller's workspace. The console starts
+            // nothing on anyone's behalf, so its jobs fall back to the workspace
+            // the job runs in.
+            if let Caller::Scoped(scope) = req.caller.resolve() {
+                job = job.in_scope(scope);
+            }
             let id = registry.start(job)?;
             write(method, &StartReply { id: id.0 })
         }
@@ -217,14 +259,18 @@ pub fn dispatch(
         }
         "kill" => {
             let req: KillRequest = read(method, request)?;
-            registry.kill(&JobId(req.id.clone()))?;
+            registry.kill(&JobId(req.id.clone()), &req.caller.resolve())?;
             write(method, &KillReply { id: req.id })
         }
         "list" => {
             let jobs = registry
                 .list()
                 .into_iter()
-                .map(|(id, status)| JobSummary { id: id.0, status })
+                .map(|(id, status)| JobSummary {
+                    scope: registry.scope_of(&id).unwrap_or(Scope::System),
+                    id: id.0,
+                    status,
+                })
                 .collect();
             write(method, &ListReply { jobs })
         }

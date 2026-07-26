@@ -5,6 +5,7 @@ use std::time::Duration;
 use facet::Facet;
 
 use crate::audit::Verdict;
+use crate::scope::Scope;
 
 /// A job's identity — registry-assigned, addressable across a disconnect, and
 /// **node-unique**: stable across a restart of the daemon that created it, and
@@ -111,6 +112,11 @@ impl JobStatus {
 pub struct JobRequest {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
+    /// Who owns this job. `None` means "resolve it from `cwd`", which is the
+    /// right default for an ad-hoc job: it belongs to the workspace it runs in.
+    /// A caller that knows better — a session starting work on behalf of its own
+    /// workspace while the job runs elsewhere — says so.
+    pub scope: Option<Scope>,
     /// Optional execution deadline. A job still running past it lands
     /// `TimedOut` when it is next awaited (`wait` / `run`). v1 has no background
     /// reaper, so a job that is never awaited is not force-expired — a full
@@ -128,11 +134,18 @@ impl JobRequest {
             argv: argv.into_iter().map(Into::into).collect(),
             cwd: cwd.into(),
             deadline: None,
+            scope: None,
         }
     }
 
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    /// Declare which workspace owns this job.
+    pub fn in_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
         self
     }
 }

@@ -13,6 +13,7 @@ use crate::preflight::Preflight;
 use crate::procfs::{self, Liveness};
 use crate::record::{RecordStore, record_of};
 use crate::rules::{Decision, Disposition, NodePolicy};
+use crate::scope::{Caller, Scope};
 
 /// Write a job's current state to its durable record.
 ///
@@ -28,6 +29,7 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         &handle.resolved_cwd,
         handle.verdict,
         &handle.status,
+        &handle.scope,
         handle.pid,
         handle.pid_start,
         &handle.capture,
@@ -81,6 +83,9 @@ struct JobHandle {
     /// The kernel start time of `pid`, so a **reused** pid is never mistaken for
     /// this job. 0 when unknown.
     pid_start: u64,
+    /// Which workspace owns this job. Not the session that asked for it: a
+    /// session restart must never orphan or kill a job.
+    scope: Scope,
     /// True when this handle was rebuilt from an on-disk record rather than
     /// spawned by this registry: we hold no child handle, so there is no exit
     /// code to reap and its end is reported `OutcomeUnknown`.
@@ -334,6 +339,7 @@ impl JobRegistry {
                     resolved_cwd: PathBuf::from(&record.cwd),
                     argv: record.argv.clone(),
                     audited: record.audited,
+                    scope: record.scope.clone(),
                     pid: record.pid,
                     pid_start: record.pid_start,
                     adopted: true,
@@ -361,6 +367,16 @@ impl JobRegistry {
     pub fn with_audit(mut self, sink: Arc<dyn AuditSink>) -> Self {
         self.audit = sink;
         self
+    }
+
+    /// Which workspace owns a job.
+    ///
+    /// A **read**, so it is node-global like every other read: any session may
+    /// ask who owns what.
+    ///
+    /// implements: reads-global-writes-own-workspace
+    pub fn scope_of(&self, id: &JobId) -> Option<Scope> {
+        self.locked().jobs.get(id).map(|h| h.scope.clone())
     }
 
     /// Every job this registry knows about, in creation order.
@@ -553,6 +569,13 @@ impl JobRegistry {
                 return Err(e);
             }
         };
+        // An ad-hoc job belongs to the workspace it runs in unless the caller
+        // says otherwise. There is always an answer, so no later code path has
+        // to cope with an unowned job.
+        let scope = req
+            .scope
+            .clone()
+            .unwrap_or_else(|| Scope::resolve(&req.cwd));
         let disposition = self.disposition(&req.argv);
 
         let mut inner = self.locked();
@@ -566,6 +589,7 @@ impl JobRegistry {
             argv: req.argv,
             cwd,
             deadline: req.deadline,
+            scope: Some(scope.clone()),
         };
 
         let mut handle = JobHandle {
@@ -589,6 +613,7 @@ impl JobRegistry {
             resolved_cwd: request.cwd.clone(),
             argv: request.argv.clone(),
             audited: false,
+            scope,
             pid: 0,
             pid_start: 0,
             adopted: false,
@@ -1014,13 +1039,24 @@ impl JobRegistry {
     /// Terminate a job. A running job is signalled and `wait` then reports it
     /// `Killed`; a job still awaiting approval is withdrawn rather than left
     /// pending until the approval timeout.
-    pub fn kill(&self, id: &JobId) -> Result<(), JobError> {
+    pub fn kill(&self, id: &JobId, caller: &Caller) -> Result<(), JobError> {
         let claimed = {
             let mut inner = self.locked();
             let Inner { jobs, store } = &mut *inner;
             let handle = jobs
                 .get_mut(id)
                 .ok_or_else(|| JobError::NotFound(id.clone()))?;
+
+            // **Refused, never silently retargeted and never silently ignored.**
+            // A caller that asked to stop something and got a quiet success
+            // would believe it had.
+            if !caller.may_write(&handle.scope) {
+                return Err(JobError::ForeignWorkspace {
+                    job: id.clone(),
+                    owner: handle.scope.to_string(),
+                    caller: caller.to_string(),
+                });
+            }
 
             if handle.status == JobStatus::PendingApproval {
                 handle.status = JobStatus::Denied {

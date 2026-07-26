@@ -96,7 +96,7 @@ fn a_failing_audit_on_kill_does_not_deadlock() {
         let Ok(id) = reg.start(JobRequest::new(["echo", "unlisted"], root())) else {
             return;
         };
-        let _ = reg.kill(&id);
+        let _ = reg.kill(&id, &moco_job::Caller::Console);
     });
 }
 

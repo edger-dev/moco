@@ -20,6 +20,7 @@ use facet::Facet;
 use crate::audit::{Verdict, escape_field, unescape_field};
 use crate::error::JobError;
 use crate::job::{JobId, JobStatus};
+use crate::scope::Scope;
 
 /// Suffix of a committed record. Anything else in the directory is ignored, so
 /// a half-written temp file is never mistaken for state.
@@ -41,6 +42,9 @@ pub struct JobRecord {
     pub cwd: String,
     pub verdict: Verdict,
     pub status: JobStatus,
+    /// Who owns this job. Persisted, so ownership survives the daemon that
+    /// recorded it along with everything else about the job.
+    pub scope: Scope,
     /// The child's pid, or 0 if it never spawned.
     pub pid: u32,
     /// The kernel start time of `pid`. Compared on every probe so a **reused**
@@ -283,6 +287,7 @@ pub(crate) fn record_of(
     cwd: &Path,
     verdict: Verdict,
     status: &JobStatus,
+    scope: &Scope,
     pid: u32,
     pid_start: u64,
     capture: &Path,
@@ -295,6 +300,7 @@ pub(crate) fn record_of(
         cwd: cwd.to_string_lossy().into_owned(),
         verdict,
         status: status.clone(),
+        scope: scope.clone(),
         pid,
         pid_start,
         capture: capture.to_string_lossy().into_owned(),

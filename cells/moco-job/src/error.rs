@@ -7,6 +7,18 @@ use crate::job::JobId;
 pub enum JobError {
     /// A job was started with no program to run.
     EmptyArgv,
+    /// A caller tried to write to a job owned by another workspace.
+    ///
+    /// Names **both** workspaces: the caller cannot fix this without knowing
+    /// which one it is in and which one owns the job, and guessing between two
+    /// checkouts of the same repo is exactly the mistake this prevents.
+    ///
+    /// implements: reads-global-writes-own-workspace
+    ForeignWorkspace {
+        job: JobId,
+        owner: String,
+        caller: String,
+    },
     /// The program could not be spawned. Names the binary **and** the PATH that
     /// was searched, so the fix is obvious rather than a guess.
     Spawn {
@@ -35,6 +47,13 @@ impl fmt::Display for JobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JobError::EmptyArgv => write!(f, "empty argv: a job needs a program to run"),
+            JobError::ForeignWorkspace { job, owner, caller } => write!(
+                f,
+                "job {job} is owned by workspace '{owner}', and this caller is \
+                 '{caller}'. Writes are scoped to the caller's own workspace, so \
+                 this was refused rather than retargeted — reads are node-global \
+                 if you only meant to look."
+            ),
             JobError::Spawn {
                 program,
                 searched_path,

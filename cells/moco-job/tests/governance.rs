@@ -438,7 +438,7 @@ fn kill_withdraws_a_pending_job() {
         .start(JobRequest::new(["echo", "unlisted"], root()))
         .unwrap();
 
-    reg.kill(&id).unwrap();
+    reg.kill(&id, &moco_job::Caller::Console).unwrap();
 
     let outcome = reg.wait(&id).unwrap();
     assert_eq!(

@@ -405,7 +405,7 @@ fn killed_and_timed_out_jobs_are_audited() {
     let reg = JobRegistry::ungoverned().unwrap();
 
     let killed = reg.start(JobRequest::new(["sleep", "10"], root())).unwrap();
-    reg.kill(&killed).unwrap();
+    reg.kill(&killed, &moco_job::Caller::Console).unwrap();
     reg.wait(&killed).unwrap();
 
     let timed = reg

@@ -43,7 +43,7 @@ fn sleep_job_can_be_killed() {
     let reg = JobRegistry::ungoverned().unwrap();
     let id = reg.start(JobRequest::new(["sleep", "10"], cwd())).unwrap();
 
-    reg.kill(&id).unwrap();
+    reg.kill(&id, &moco_job::Caller::Console).unwrap();
 
     let outcome = reg.wait(&id).unwrap();
     assert_eq!(outcome.status, JobStatus::Killed);
