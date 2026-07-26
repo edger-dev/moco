@@ -405,25 +405,21 @@ impl JobRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Append this job's terminal record, exactly once.
-    ///
-    /// Called at the moment a job reaches a terminal state — including every
-    /// denial, which is written at denial time rather than reconstructed later.
-    /// An audit failure fails the operation: "every attempt is durable history"
-    /// is a contract, so a record that cannot be written is not silently lost.
-    ///
-    /// implements: audit-every-attempt
-    fn record(&self, id: &JobId, handle: &mut JobHandle) -> Result<(), JobError> {
-        match self.claim(id, handle) {
-            Some(record) => self.flush(id, record),
-            None => Ok(()),
-        }
-    }
-
     /// Claim the right to write this job's record, returning what to write.
     ///
     /// Pure bookkeeping — no I/O, so it is safe to call under the registry lock.
     /// Returns `None` if the record is already written or already claimed.
+    ///
+    /// **The claim must be [`flush`](Self::flush)ed after the lock is
+    /// released.** There is deliberately no helper that does both: one existed,
+    /// every caller under the lock used it, and `flush` re-locks on failure — so
+    /// an audit-write failure on the `start`, `decide` or `kill` path deadlocked
+    /// the registry. The two halves are separate so that the unlock between them
+    /// has to be written out, where it can be seen.
+    ///
+    /// implements: audit-every-attempt
+    #[must_use = "a claimed record must be flushed once the lock is released, \
+                  or the attempt is silently lost"]
     fn claim(&self, id: &JobId, handle: &mut JobHandle) -> Option<AuditRecord> {
         if handle.audited {
             return None;
@@ -616,11 +612,15 @@ impl JobRegistry {
                         handle.status = JobStatus::Failed {
                             error: e.to_string(),
                         };
-                        let _ = self.record(&id, &mut handle);
+                        let claimed = self.claim(&id, &mut handle);
                         // Leave a real record behind, not the empty file that
                         // minting the id created: an id claim with no record is
                         // state nobody can read.
                         let _ = persist(&inner.store, &id, &handle);
+                        drop(inner);
+                        if let Some(record) = claimed {
+                            let _ = self.flush(&id, record);
+                        }
                         return Err(e);
                     }
                 }
@@ -638,15 +638,23 @@ impl JobRegistry {
 
         // A denial is history the moment it happens — never reconstructed, and
         // never dependent on someone calling wait().
-        if handle.status.is_terminal() {
-            self.record(&id, &mut handle)?;
-        }
+        let claimed = if handle.status.is_terminal() {
+            self.claim(&id, &mut handle)
+        } else {
+            None
+        };
 
         // Durable before the id is returned: a caller holding an id must never
         // find that the daemon died before the job it names was written down.
         persist(&inner.store, &id, &handle)?;
 
         inner.jobs.insert(id.clone(), handle);
+        // Release before writing the audit: the sink can block, and an audit
+        // failure re-locks to release the claim.
+        drop(inner);
+        if let Some(record) = claimed {
+            self.flush(&id, record)?;
+        }
         Ok(id)
     }
 
@@ -704,110 +712,128 @@ impl JobRegistry {
         };
         let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
 
-        let mut inner = self.locked();
-        // Split the borrow so the durable record can be written while the live
-        // handle is still held: they are disjoint fields of `Inner`.
-        let Inner { jobs, store } = &mut *inner;
-        let handle = jobs
-            .get_mut(id)
-            .ok_or_else(|| JobError::NotFound(id.clone()))?;
+        // The whole decision runs under the lock and yields *what to audit*;
+        // the write itself happens after the lock is released, below. Doing it
+        // inline would hold the registry across a sink that can block, and
+        // would deadlock outright when the sink fails — `flush` re-locks to
+        // release the claim.
+        let mut claimed: Option<AuditRecord> = None;
+        let outcome = (|| -> Result<(), JobError> {
+            let mut inner = self.locked();
+            // Split the borrow so the durable record can be written while the
+            // live handle is still held: they are disjoint fields of `Inner`.
+            let Inner { jobs, store } = &mut *inner;
+            let handle = jobs
+                .get_mut(id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
-        if handle.status != JobStatus::PendingApproval {
-            return Err(JobError::NotPending(id.clone()));
-        }
-
-        // The decision arrived too late: fail closed rather than spawn.
-        if approval_timeout.is_some_and(|t| handle.started.elapsed() >= t) {
-            handle.status = JobStatus::Denied {
-                reason: DeniedReason::NoApprover,
-            };
-            handle.verdict = Verdict::NoApprover;
-            handle.pending = None;
-            let recorded = self.record(id, handle);
-            let _ = persist(store, id, handle);
-            return recorded;
-        }
-
-        if edited_disposition == Some(Disposition::Deny) {
-            handle.status = JobStatus::Denied {
-                reason: DeniedReason::Rule,
-            };
-            handle.verdict = Verdict::SeedDeny;
-            handle.pending = None;
-            let recorded = self.record(id, handle);
-            let _ = persist(store, id, handle);
-            return recorded;
-        }
-
-        let request = handle
-            .pending
-            .take()
-            .ok_or_else(|| JobError::NotPending(id.clone()))?;
-
-        match decision {
-            Decision::DenyOnce => {
-                handle.status = JobStatus::Denied {
-                    reason: DeniedReason::Decision,
-                };
-                handle.verdict = Verdict::RejectedOnce;
-                let recorded = self.record(id, handle);
-                let _ = persist(store, id, handle);
-                return recorded;
+            if handle.status != JobStatus::PendingApproval {
+                return Err(JobError::NotPending(id.clone()));
             }
-            Decision::AllowOnce { edited_argv } => {
-                // An edited argv is the correction back-channel: it, not the
-                // proposal, is what actually runs.
-                let argv = edited_argv.unwrap_or(request.argv);
-                // Re-confine immediately before spawning: the cwd was resolved
-                // when the job was proposed, possibly long ago. This shrinks —
-                // but cannot fully close — the window in which a path component
-                // is swapped for a symlink out of the allowed root.
-                let cwd = match self.confined_cwd(&request.cwd) {
-                    Ok(cwd) => cwd,
-                    Err(e) => {
-                        // Terminal, so it needs both a verdict and a record —
-                        // otherwise the job's status and verdict disagree and
-                        // nothing is ever written.
-                        handle.status = JobStatus::Denied {
-                            reason: DeniedReason::CwdEscape,
-                        };
-                        handle.verdict = Verdict::SeedDeny;
-                        let _ = self.record(id, handle);
-                        return Err(e);
-                    }
+
+            // The decision arrived too late: fail closed rather than spawn.
+            if approval_timeout.is_some_and(|t| handle.started.elapsed() >= t) {
+                handle.status = JobStatus::Denied {
+                    reason: DeniedReason::NoApprover,
                 };
-                match spawn_child(&argv, &cwd, &handle.capture_write) {
-                    Ok(child) => {
-                        handle.pid = child.id();
-                        handle.pid_start = procfs::start_time(handle.pid).unwrap_or(0);
-                        handle.child = Some(child);
-                        handle.status = JobStatus::Running;
-                        // The approval is the authority, and the argv that ran
-                        // is what the record must name.
-                        handle.verdict = Verdict::ApprovedOnce;
-                        handle.argv = argv;
-                        handle.resolved_cwd = cwd;
-                        // The execution deadline runs from the spawn, not from
-                        // the moment the job entered the approval queue.
-                        handle.started = Instant::now();
-                    }
-                    Err(e) => {
-                        // Never leave the job pending with its decision consumed:
-                        // that would strand it until the approval timeout and
-                        // report the wrong reason.
-                        handle.status = JobStatus::Denied {
-                            reason: DeniedReason::Decision,
-                        };
-                        handle.verdict = Verdict::RejectedOnce;
-                        let _ = self.record(id, handle);
-                        let _ = persist(store, id, handle);
-                        return Err(e);
+                handle.verdict = Verdict::NoApprover;
+                handle.pending = None;
+                claimed = self.claim(id, handle);
+                let _ = persist(store, id, handle);
+                return Ok(());
+            }
+
+            if edited_disposition == Some(Disposition::Deny) {
+                handle.status = JobStatus::Denied {
+                    reason: DeniedReason::Rule,
+                };
+                handle.verdict = Verdict::SeedDeny;
+                handle.pending = None;
+                claimed = self.claim(id, handle);
+                let _ = persist(store, id, handle);
+                return Ok(());
+            }
+
+            let request = handle
+                .pending
+                .take()
+                .ok_or_else(|| JobError::NotPending(id.clone()))?;
+
+            match decision {
+                Decision::DenyOnce => {
+                    handle.status = JobStatus::Denied {
+                        reason: DeniedReason::Decision,
+                    };
+                    handle.verdict = Verdict::RejectedOnce;
+                    claimed = self.claim(id, handle);
+                    let _ = persist(store, id, handle);
+                    return Ok(());
+                }
+                Decision::AllowOnce { edited_argv } => {
+                    // An edited argv is the correction back-channel: it, not
+                    // the proposal, is what actually runs.
+                    let argv = edited_argv.unwrap_or(request.argv);
+                    // Re-confine immediately before spawning: the cwd was
+                    // resolved when the job was proposed, possibly long ago.
+                    // This shrinks — but cannot fully close — the window in
+                    // which a path component is swapped for a symlink out of
+                    // the allowed root.
+                    let cwd = match self.confined_cwd(&request.cwd) {
+                        Ok(cwd) => cwd,
+                        Err(e) => {
+                            // Terminal, so it needs both a verdict and a record
+                            // — otherwise the job's status and verdict disagree
+                            // and nothing is ever written.
+                            handle.status = JobStatus::Denied {
+                                reason: DeniedReason::CwdEscape,
+                            };
+                            handle.verdict = Verdict::SeedDeny;
+                            claimed = self.claim(id, handle);
+                            let _ = persist(store, id, handle);
+                            return Err(e);
+                        }
+                    };
+                    match spawn_child(&argv, &cwd, &handle.capture_write) {
+                        Ok(child) => {
+                            handle.pid = child.id();
+                            handle.pid_start = procfs::start_time(handle.pid).unwrap_or(0);
+                            handle.child = Some(child);
+                            handle.status = JobStatus::Running;
+                            // The approval is the authority, and the argv that
+                            // ran is what the record must name.
+                            handle.verdict = Verdict::ApprovedOnce;
+                            handle.argv = argv;
+                            handle.resolved_cwd = cwd;
+                            // The execution deadline runs from the spawn, not
+                            // from the moment the job entered the approval
+                            // queue.
+                            handle.started = Instant::now();
+                        }
+                        Err(e) => {
+                            // Never leave the job pending with its decision
+                            // consumed: that would strand it until the approval
+                            // timeout and report the wrong reason.
+                            handle.status = JobStatus::Denied {
+                                reason: DeniedReason::Decision,
+                            };
+                            handle.verdict = Verdict::RejectedOnce;
+                            claimed = self.claim(id, handle);
+                            let _ = persist(store, id, handle);
+                            return Err(e);
+                        }
                     }
                 }
             }
+            let _ = persist(store, id, handle);
+            Ok(())
+        })();
+
+        // Lock released. Write the audit now; an audit failure is the operation's
+        // failure, because "every attempt is durable history" is a contract.
+        if let Some(record) = claimed {
+            self.flush(id, record)?;
         }
-        let _ = persist(store, id, handle);
-        Ok(())
+        outcome
     }
 
     /// Read output incrementally from `offset`, with the job's live status.
@@ -989,30 +1015,40 @@ impl JobRegistry {
     /// `Killed`; a job still awaiting approval is withdrawn rather than left
     /// pending until the approval timeout.
     pub fn kill(&self, id: &JobId) -> Result<(), JobError> {
-        let mut inner = self.locked();
-        let Inner { jobs, store } = &mut *inner;
-        let handle = jobs
-            .get_mut(id)
-            .ok_or_else(|| JobError::NotFound(id.clone()))?;
+        let claimed = {
+            let mut inner = self.locked();
+            let Inner { jobs, store } = &mut *inner;
+            let handle = jobs
+                .get_mut(id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
-        if handle.status == JobStatus::PendingApproval {
-            handle.status = JobStatus::Denied {
-                reason: DeniedReason::Decision,
-            };
-            handle.verdict = Verdict::RejectedOnce;
-            handle.pending = None;
-            let recorded = self.record(id, handle);
-            let _ = persist(store, id, handle);
-            return recorded;
-        }
+            if handle.status == JobStatus::PendingApproval {
+                handle.status = JobStatus::Denied {
+                    reason: DeniedReason::Decision,
+                };
+                handle.verdict = Verdict::RejectedOnce;
+                handle.pending = None;
+                let claimed = self.claim(id, handle);
+                let _ = persist(store, id, handle);
+                claimed
+            } else {
+                // Record operator intent regardless of the signal's result:
+                // `killed` is why `wait` reports `Killed` rather than an exit
+                // code. A terminal job has `child == None`, so killing it is a
+                // no-op.
+                if let Some(child) = handle.child.as_mut() {
+                    handle.killed = true;
+                    let _ = child.kill();
+                    let _ = persist(store, id, handle);
+                }
+                None
+            }
+        };
 
-        // Record operator intent regardless of the signal's result: `killed`
-        // is why `wait` reports `Killed` rather than an exit code. A terminal
-        // job has `child == None`, so killing it is a no-op.
-        if let Some(child) = handle.child.as_mut() {
-            handle.killed = true;
-            let _ = child.kill();
-            let _ = persist(store, id, handle);
+        // Lock released before the audit write: the sink can block, and on
+        // failure `flush` re-locks to release the claim.
+        if let Some(record) = claimed {
+            self.flush(id, record)?;
         }
         Ok(())
     }
