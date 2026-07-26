@@ -149,3 +149,43 @@ fn an_unstartable_program_fails_across_the_wire() {
         "the failure must name the binary, got: {message}"
     );
 }
+
+/// **Polling must be able to observe completion.** A caller that only ever
+/// tails — which is what a remote poller does — has to see a finished job stop
+/// reporting `Running`, or it waits forever for news that never comes.
+#[test]
+fn tail_settles_a_finished_job_without_a_separate_wait() {
+    let reg = registry();
+
+    let request = wire::encode(&StartRequest {
+        argv: vec!["echo".into(), "done".into()],
+        cwd: root().to_string_lossy().into_owned(),
+        deadline_ms: 0,
+    })
+    .expect("encode");
+    let started: wire::StartReply =
+        wire::decode(&wire::dispatch(&reg, "start", &request).expect("start")).expect("decode");
+
+    // Never call `wait`. Poll only, exactly as a remote caller would.
+    let mut status = JobStatus::Running;
+    for _ in 0..200 {
+        let request = wire::encode(&TailRequest {
+            id: started.id.clone(),
+            offset: 0,
+        })
+        .expect("encode tail");
+        let tail: wire::TailReply =
+            wire::decode(&wire::dispatch(&reg, "tail", &request).expect("tail")).expect("decode");
+        status = tail.status;
+        if status != JobStatus::Running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        status,
+        JobStatus::Done { code: 0 },
+        "tail alone must be enough to see a job finish"
+    );
+}

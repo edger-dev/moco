@@ -812,24 +812,72 @@ impl JobRegistry {
 
     /// Read output incrementally from `offset`, with the job's live status.
     pub fn tail(&self, id: &JobId, offset: u64) -> Result<Tail, JobError> {
-        let inner = self.locked();
-        let handle = inner
-            .jobs
-            .get(id)
-            .ok_or_else(|| JobError::NotFound(id.clone()))?;
+        // **Settle the job first.** Without this, a caller that only ever tails
+        // — which is exactly what a polling remote caller does — would watch a
+        // finished job report `Running` forever, because nothing else had
+        // reaped it. Status is part of every tail precisely so that polling is
+        // a complete way to observe a job; that is only true if the status is
+        // current.
+        let (tail, record) = {
+            let mut inner = self.locked();
+            let Inner { jobs, store } = &mut *inner;
+            let handle = jobs
+                .get_mut(id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
 
-        // Read through the handle opened at job creation — never re-open by
-        // path, which a swapped file could hijack.
-        let mut file = handle.capture_read.try_clone().map_err(JobError::Io)?;
-        file.seek(SeekFrom::Start(offset)).map_err(JobError::Io)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(JobError::Io)?;
+            let mut claimed = None;
+            if !handle.status.is_terminal() {
+                if let Some(child) = handle.child.as_mut() {
+                    if let Some(exit) = child.try_wait().map_err(JobError::Io)? {
+                        handle.status = if handle.killed {
+                            JobStatus::Killed
+                        } else {
+                            JobStatus::Done {
+                                code: exit.code().unwrap_or(-1),
+                            }
+                        };
+                        handle.child = None;
+                        let _ = persist(store, id, handle);
+                        claimed = self.claim(id, handle);
+                    }
+                } else if handle.adopted {
+                    // Not our child: liveness is all we have, and a dead one
+                    // ends as `outcome-unknown` rather than a made-up code.
+                    match procfs::liveness(handle.pid, handle.pid_start) {
+                        Liveness::Alive => {}
+                        Liveness::Dead | Liveness::Unsupported => {
+                            handle.status = JobStatus::OutcomeUnknown;
+                            let _ = persist(store, id, handle);
+                            claimed = self.claim(id, handle);
+                        }
+                    }
+                }
+            }
 
-        Ok(Tail {
-            next_offset: offset + bytes.len() as u64,
-            bytes,
-            status: handle.status.clone(),
-        })
+            // Read through the handle opened at job creation — never re-open by
+            // path, which a swapped file could hijack.
+            let mut file = handle.capture_read.try_clone().map_err(JobError::Io)?;
+            file.seek(SeekFrom::Start(offset)).map_err(JobError::Io)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(JobError::Io)?;
+
+            (
+                Tail {
+                    next_offset: offset + bytes.len() as u64,
+                    bytes,
+                    status: handle.status.clone(),
+                },
+                claimed,
+            )
+        };
+
+        // Flush with the lock released: a sink can block on a hung filesystem,
+        // and holding the registry lock across that would freeze every other
+        // job. (It is also why `flush` may re-lock safely from here.)
+        if let Some(record) = record {
+            self.flush(id, record)?;
+        }
+        Ok(tail)
     }
 
     /// Block until the job is terminal and return its outcome. Resumable after a
