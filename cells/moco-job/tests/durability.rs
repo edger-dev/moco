@@ -264,3 +264,33 @@ fn records_round_trip_including_multiline_argv() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A string that *looks* like another type must still come back a string.
+///
+/// `/bin/true` in an argv is not exotic, and Styx emits a bare `true` for it —
+/// which reads back as a boolean and makes the whole record undecodable. Found
+/// while giving a declared job a port; nothing had exercised it before because
+/// no earlier test round-tripped such a value through a record.
+#[test]
+fn a_bool_lookalike_argv_still_round_trips() {
+    let dir = shared_dir();
+    let reg = JobRegistry::ungoverned().unwrap().with_dir(&dir).unwrap();
+
+    let id = reg
+        .start(JobRequest::new(["true"], root()))
+        .expect("start /bin/true");
+    reg.wait(&id).expect("wait");
+
+    let records = RecordStore::open(&dir)
+        .unwrap()
+        .all()
+        .expect("records must decode");
+    let record = records.iter().find(|r| r.id == id.0).expect("found");
+    assert_eq!(
+        record.argv,
+        vec!["true".to_string()],
+        "a string is a string even when it spells a boolean"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

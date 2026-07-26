@@ -11,6 +11,7 @@ use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
 use crate::lifecycle::{Lifetime, RestartPolicy};
 use crate::manifest::Manifest;
+use crate::port::{self, PortRange, PortRequest};
 use crate::preflight::Preflight;
 use crate::procfs::{self, Liveness};
 use crate::record::{RecordStore, record_of};
@@ -36,6 +37,7 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         handle.lifetime,
         handle.restart,
         handle.restarts,
+        handle.port,
         handle.pid,
         handle.pid_start,
         &handle.capture,
@@ -99,6 +101,10 @@ struct JobHandle {
     restart: RestartPolicy,
     /// How many times the supervisor has brought this job back.
     restarts: u64,
+    /// The port the node allocated it, or 0 for none.
+    port: u16,
+    /// The environment variable the port arrives in.
+    port_env: String,
     /// True when this handle was rebuilt from an on-disk record rather than
     /// spawned by this registry: we hold no child handle, so there is no exit
     /// code to reap and its end is reported `OutcomeUnknown`.
@@ -111,6 +117,22 @@ struct Inner {
     jobs: HashMap<JobId, JobHandle>,
     /// The on-disk home of this registry's records and captures.
     store: RecordStore,
+}
+
+impl JobHandle {
+    /// The allocated port, if there is one.
+    fn port_request(&self) -> Option<u16> {
+        (self.port != 0).then_some(self.port)
+    }
+
+    /// Where the port is delivered.
+    fn port_env_or_default(&self) -> &str {
+        if self.port_env.is_empty() {
+            crate::port::DEFAULT_PORT_ENV
+        } else {
+            &self.port_env
+        }
+    }
 }
 
 impl Drop for JobHandle {
@@ -219,13 +241,26 @@ fn outcome_of(handle: &JobHandle) -> Outcome {
 ///
 /// implements: argv-not-shell
 /// implements: job-durability-both-kill-vectors (file-backed stdio half)
-fn spawn_child(argv: &[String], cwd: &Path, capture: &File) -> Result<Child, JobError> {
+fn spawn_child(
+    argv: &[String],
+    cwd: &Path,
+    capture: &File,
+    port: Option<u16>,
+    port_env: &str,
+) -> Result<Child, JobError> {
     let (program, args) = argv.split_first().ok_or(JobError::EmptyArgv)?;
 
     let stdout = capture.try_clone().map_err(JobError::Io)?;
     let stderr = capture.try_clone().map_err(JobError::Io)?;
 
-    Command::new(program)
+    let mut command = Command::new(program);
+    if let Some(port) = port {
+        // Delivery is env injection. `sh -c` is not involved, so nothing here
+        // expands: a program that wants the port on its command line uses the
+        // `@MOCO_PORT` argv token instead, substituted before we get here.
+        command.env(port_env, port.to_string());
+    }
+    command
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -357,6 +392,8 @@ impl JobRegistry {
                     lifetime: record.lifetime,
                     restart: record.restart,
                     restarts: record.restarts,
+                    port: record.port,
+                    port_env: String::new(),
                     pid: record.pid,
                     pid_start: record.pid_start,
                     adopted: true,
@@ -446,14 +483,44 @@ impl JobRegistry {
             PathBuf::from(root).join(&entry.cwd)
         };
 
+        // Allocated here, before the job exists but after the caller has been
+        // resolved — and inside `start` the gate still runs first, so a refused
+        // job never gets to hold one.
+        let allocated = {
+            let inner = self.locked();
+            port::allocate(
+                &inner.store,
+                PortRange::from_env(),
+                scope,
+                Some(&entry.name),
+                entry.port,
+            )?
+        };
+
         let mut request = JobRequest::new(entry.argv.clone(), cwd)
             .in_scope(scope.clone())
             .named(&entry.name)
             .with_lifecycle(entry.lifetime, entry.restart);
+        if let Some(port) = allocated {
+            request = request.with_port(port, Manifest::port_env_of(entry));
+        }
         if entry.deadline_ms > 0 {
             request = request.with_deadline(Duration::from_millis(entry.deadline_ms));
         }
         self.start(request)
+    }
+
+    /// The port the node allocated this job, if any.
+    ///
+    /// Visible rather than implicit: a port present only in the child's
+    /// environment leaves nobody able to say which checkout's server is on
+    /// which port, which is most of why allocation was centralized.
+    pub fn port_of(&self, id: &JobId) -> Option<u16> {
+        self.locked()
+            .jobs
+            .get(id)
+            .map(|h| h.port)
+            .filter(|p| *p != 0)
     }
 
     /// A job's current status.
@@ -800,6 +867,8 @@ impl JobRegistry {
             name: req.name.clone(),
             lifetime: req.lifetime,
             restart: req.restart,
+            port: req.port,
+            port_env: req.port_env.clone(),
         };
 
         let mut handle = JobHandle {
@@ -828,6 +897,8 @@ impl JobRegistry {
             lifetime: req.lifetime,
             restart: req.restart,
             restarts: 0,
+            port: req.port.unwrap_or(0),
+            port_env: req.port_env.clone(),
             pid: 0,
             pid_start: 0,
             adopted: false,
@@ -835,7 +906,17 @@ impl JobRegistry {
 
         match disposition {
             Disposition::Allow => {
-                match spawn_child(&request.argv, &request.cwd, &handle.capture_write) {
+                // Substitution happens **below the gate**: the rule-set matched
+                // the argv as declared, token and all, and only now does the
+                // node-supplied value go in.
+                let spawn_argv = port::substitute(&request.argv, handle.port_request());
+                match spawn_child(
+                    &spawn_argv,
+                    &request.cwd,
+                    &handle.capture_write,
+                    handle.port_request(),
+                    handle.port_env_or_default(),
+                ) {
                     Ok(child) => {
                         handle.pid = child.id();
                         // Recorded at spawn: this is what makes a later probe
@@ -1032,7 +1113,14 @@ impl JobRegistry {
                             return Err(e);
                         }
                     };
-                    match spawn_child(&argv, &cwd, &handle.capture_write) {
+                    let spawn_argv = port::substitute(&argv, handle.port_request());
+                    match spawn_child(
+                        &spawn_argv,
+                        &cwd,
+                        &handle.capture_write,
+                        handle.port_request(),
+                        handle.port_env_or_default(),
+                    ) {
                         Ok(child) => {
                             handle.pid = child.id();
                             handle.pid_start = procfs::start_time(handle.pid).unwrap_or(0);

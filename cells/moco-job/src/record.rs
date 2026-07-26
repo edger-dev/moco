@@ -51,6 +51,9 @@ pub struct JobRecord {
     pub name: String,
     pub lifetime: Lifetime,
     pub restart: RestartPolicy,
+    /// The port this job holds; 0 for none. Persisted so a re-adopting daemon
+    /// keeps it and a peer daemon sees it in its scan.
+    pub port: u16,
     /// How many times the supervisor has brought this job back.
     pub restarts: u64,
     /// The child's pid, or 0 if it never spawned.
@@ -276,6 +279,38 @@ impl RecordStore {
         Ok(out)
     }
 
+    /// Note that a declaration holds `port`, without there being a live job.
+    ///
+    /// Written as an ordinary terminal record so the *same* scan that computes
+    /// the reserved set also finds it — a second index would be a second thing
+    /// to keep true.
+    pub fn remember_port(
+        &self,
+        scope: &crate::scope::Scope,
+        name: &str,
+        port: u16,
+    ) -> Result<(), JobError> {
+        let id = self.mint()?;
+        self.put(&JobRecord {
+            id: id.0,
+            argv: Vec::new(),
+            cwd: String::new(),
+            verdict: Verdict::Ungoverned,
+            status: JobStatus::Done { code: 0 },
+            scope: scope.clone(),
+            name: name.to_string(),
+            lifetime: Lifetime::OneShot,
+            restart: RestartPolicy::Never,
+            restarts: 0,
+            port,
+            pid: 0,
+            pid_start: 0,
+            capture: String::new(),
+            deadline_ms: 0,
+            audited: true,
+        })
+    }
+
     /// Forget a job entirely: its record and its capture.
     pub fn remove(&self, id: &str) -> Result<(), JobError> {
         let _ = std::fs::remove_file(self.capture_path(id));
@@ -300,6 +335,7 @@ pub(crate) fn record_of(
     lifetime: Lifetime,
     restart: RestartPolicy,
     restarts: u64,
+    port: u16,
     pid: u32,
     pid_start: u64,
     capture: &Path,
@@ -317,6 +353,7 @@ pub(crate) fn record_of(
         lifetime,
         restart,
         restarts,
+        port,
         pid,
         pid_start,
         capture: capture.to_string_lossy().into_owned(),

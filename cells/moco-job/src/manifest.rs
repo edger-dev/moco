@@ -19,6 +19,7 @@ use facet::Facet;
 
 use crate::error::JobError;
 use crate::lifecycle::{Autostart, Lifetime, RestartPolicy};
+use crate::port::{self, PortRequest};
 
 /// The manifest's filename, at the workspace root.
 ///
@@ -57,6 +58,15 @@ pub struct ProcEntry {
     /// When it is *first* started, and by whom.
     #[facet(default = Autostart::Manual)]
     pub autostart: Autostart,
+    /// Whether this job wants a port, and which.
+    #[facet(default = PortRequest::None)]
+    pub port: PortRequest,
+    /// The environment variable the port arrives in. The argv token stays
+    /// `@MOCO_PORT` regardless — only `@MOCO_*` names are node-supplied, so the
+    /// token namespace is fixed even when the variable is renamed for the
+    /// program's benefit.
+    #[facet(default)]
+    pub port_env: String,
 }
 
 /// Everything one workspace declares.
@@ -114,6 +124,7 @@ impl Manifest {
             detail: e.to_string(),
         })?;
         manifest.check_unique_names(&path)?;
+        manifest.check_tokens(&path)?;
         Ok(manifest)
     }
 
@@ -133,6 +144,29 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+
+    /// Refuse an argv containing something that will not expand.
+    ///
+    /// At **load**, so a typo is a config error naming the file rather than a
+    /// literal `@MOCO_PROT` arriving at the program as an argument.
+    fn check_tokens(&self, path: &Path) -> Result<(), JobError> {
+        for entry in &self.proc {
+            port::validate_tokens(&entry.argv).map_err(|detail| JobError::Manifest {
+                path: path.display().to_string(),
+                detail: format!("in '{}': {detail}", entry.name),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The environment variable this entry's port should arrive in.
+    pub fn port_env_of(entry: &ProcEntry) -> &str {
+        if entry.port_env.is_empty() {
+            port::DEFAULT_PORT_ENV
+        } else {
+            &entry.port_env
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -165,6 +199,8 @@ mod tests {
                 lifetime: Lifetime::OneShot,
                 restart: RestartPolicy::Never,
                 autostart: Autostart::Manual,
+                port: PortRequest::None,
+                port_env: String::new(),
             }],
         };
         let text = facet_styx::to_string(&manifest).expect("encode");

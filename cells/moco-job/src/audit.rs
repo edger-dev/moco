@@ -185,9 +185,20 @@ impl FileAuditLog {
 /// exactly one line whatever the payload; `unescape_field` restores the value
 /// byte-for-byte, so fidelity is preserved.
 pub(crate) fn escape_field(s: &str) -> String {
-    s.replace('\\', "\\\\")
+    let escaped = s
+        .replace('\\', "\\\\")
         .replace('\n', "\\n")
-        .replace('\r', "\\r")
+        .replace('\r', "\\r");
+    // A string whose *whole* content reads as another Styx type is emitted bare
+    // and decodes back as that type — `"true"` becomes a bool and the record is
+    // unreadable. Found with `/bin/true` in an argv, which is not exotic.
+    // A leading marker makes it unambiguously a string; `\\` is already escaped
+    // above, so `\=` cannot occur by accident.
+    if matches!(s, "true" | "false") {
+        format!("\\={escaped}")
+    } else {
+        escaped
+    }
 }
 
 /// Reverse `escape_field`, left to right so `\\n` reads back as a literal
@@ -204,6 +215,8 @@ pub(crate) fn unescape_field(s: &str) -> String {
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
             Some('\\') => out.push('\\'),
+            // The bare-ambiguity marker: consumed, contributing nothing.
+            Some('=') => {}
             Some(other) => {
                 out.push('\\');
                 out.push(other);

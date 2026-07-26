@@ -124,6 +124,10 @@ pub struct JobRequest {
     pub lifetime: Lifetime,
     /// What happens when it exits. Meaningful only for a service.
     pub restart: RestartPolicy,
+    /// The port the node allocated, if any. Resolved before the spawn.
+    pub port: Option<u16>,
+    /// The environment variable the port arrives in.
+    pub port_env: String,
     /// Optional execution deadline. A job still running past it lands
     /// `TimedOut` when it is next awaited (`wait` / `run`). v1 has no background
     /// reaper, so a job that is never awaited is not force-expired — a full
@@ -145,6 +149,8 @@ impl JobRequest {
             name: None,
             lifetime: Lifetime::OneShot,
             restart: RestartPolicy::Never,
+            port: None,
+            port_env: String::new(),
         }
     }
 
@@ -162,6 +168,13 @@ impl JobRequest {
     /// Record the manifest name this job was declared under.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Hand this job an already-allocated port, delivered in `env`.
+    pub fn with_port(mut self, port: u16, env: impl Into<String>) -> Self {
+        self.port = Some(port);
+        self.port_env = env.into();
         self
     }
 
