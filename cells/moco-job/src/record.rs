@@ -72,6 +72,11 @@ pub struct JobRecord {
     pub machine_file: String,
     /// What is in it.
     pub machine_format: String,
+    /// Bytes discarded from the front of the capture by compaction.
+    ///
+    /// Persisted, so a re-adopting daemon keeps handing out logical offsets
+    /// that mean the same thing as the ones it handed out before the restart.
+    pub dropped: u64,
     /// True when this job was **handed over** rather than started here.
     ///
     /// Persisted, so re-adoption preserves it: "we were given this" and "we
@@ -315,6 +320,7 @@ impl RecordStore {
             port,
             machine_file: String::new(),
             machine_format: String::new(),
+            dropped: 0,
             external: false,
             pid: 0,
             pid_start: 0,
@@ -351,6 +357,7 @@ pub(crate) fn record_of(
     port: u16,
     machine_file: &str,
     machine_format: &str,
+    dropped: u64,
     external: bool,
     pid: u32,
     pid_start: u64,
@@ -372,6 +379,7 @@ pub(crate) fn record_of(
         port,
         machine_file: machine_file.to_string(),
         machine_format: machine_format.to_string(),
+        dropped,
         external,
         pid,
         pid_start,

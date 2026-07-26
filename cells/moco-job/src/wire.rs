@@ -86,6 +86,9 @@ pub struct TailRequest {
 pub struct TailReply {
     pub bytes: Vec<u8>,
     pub next_offset: u64,
+    /// Bytes discarded before these, because the scrollback is bounded.
+    /// Non-zero means this reader fell behind and some output is gone.
+    pub skipped: u64,
     pub status: JobStatus,
 }
 
@@ -307,6 +310,7 @@ pub fn dispatch(
                 &TailReply {
                     bytes: tail.bytes,
                     next_offset: tail.next_offset,
+                    skipped: tail.skipped,
                     status: tail.status,
                 },
             )

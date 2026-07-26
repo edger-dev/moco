@@ -215,7 +215,16 @@ impl JobRequest {
 #[derive(Debug, Clone)]
 pub struct Tail {
     pub bytes: Vec<u8>,
+    /// Resume here. A **logical** offset: total bytes ever written, not a
+    /// position in the file, so compaction cannot silently redirect a caller's
+    /// resume point onto different content.
     pub next_offset: u64,
+    /// How many bytes were discarded before what you are holding.
+    ///
+    /// Non-zero means this reader fell behind a bounded scrollback and some
+    /// output is gone. Said out loud, because the alternative is a caller
+    /// quietly missing the very lines it was polling for.
+    pub skipped: u64,
     pub status: JobStatus,
 }
 

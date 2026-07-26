@@ -20,6 +20,54 @@ use crate::record::{RecordStore, record_of};
 use crate::rules::{Decision, Disposition, NodePolicy};
 use crate::scope::{Caller, Scope};
 
+/// Discard the oldest part of a capture that has outgrown its cap.
+///
+/// Keeps the **most recent** bytes: the newest output is what someone is
+/// looking at, and dropping the tail to preserve the beginning would throw away
+/// exactly the part being watched.
+///
+/// Returns how many bytes went, which the caller adds to the job's `dropped`
+/// count. That count is the whole difference between a *logical* offset — total
+/// bytes ever written — and a position in the file, and keeping it is what stops
+/// compaction from silently redirecting a reader's resume point onto different
+/// content.
+///
+/// The capture is opened `O_APPEND`, so a child writing concurrently always
+/// lands after whatever is there: rewriting the file underneath it is safe.
+/// Bytes written between the read and the truncate are lost — a small race,
+/// bounded by one compaction, on data already destined to be discarded.
+fn compact(path: &Path, cap: u64) -> Result<u64, JobError> {
+    let len = match std::fs::metadata(path) {
+        Ok(meta) => meta.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(JobError::Io(e)),
+    };
+    if len <= cap {
+        return Ok(0);
+    }
+
+    let keep = (cap * KEEP_NUMERATOR / KEEP_DENOMINATOR).max(1);
+    let drop_from_front = len.saturating_sub(keep);
+
+    let mut file = File::open(path).map_err(JobError::Io)?;
+    file.seek(SeekFrom::Start(drop_from_front))
+        .map_err(JobError::Io)?;
+    let mut kept = Vec::with_capacity(keep as usize);
+    file.read_to_end(&mut kept).map_err(JobError::Io)?;
+    drop(file);
+
+    // Truncate and rewrite in place: the child's `O_APPEND` fd keeps working,
+    // and its next write lands after what we just kept.
+    let mut out = File::options()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(JobError::Io)?;
+    use std::io::Write;
+    out.write_all(&kept).map_err(JobError::Io)?;
+    Ok(drop_from_front)
+}
+
 /// Write a job's current state to its durable record.
 ///
 /// Called at every transition, so a daemon that dies at any point leaves a
@@ -42,6 +90,7 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         handle.port,
         &handle.machine_file,
         &handle.machine_format,
+        handle.dropped,
         handle.external,
         handle.pid,
         handle.pid_start,
@@ -53,6 +102,21 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
 
 /// How often `wait` polls a running child for exit / deadline / decision.
 const POLL: Duration = Duration::from_millis(10);
+
+/// How large a job's scrollback may grow before the oldest of it is discarded.
+///
+/// A redrawing TUI writes without bound — most of it superseded the instant it
+/// lands — so an uncapped capture is a disk-filling bug waiting for a long
+/// enough run.
+pub const DEFAULT_CAPTURE_CAP: u64 = 4 * 1024 * 1024;
+
+/// What a compaction keeps, as a fraction of the cap.
+///
+/// Well below the cap on purpose: compacting back to exactly the limit would
+/// mean compacting again on the very next write, turning a bounded file into a
+/// rewrite loop.
+const KEEP_NUMERATOR: u64 = 3;
+const KEEP_DENOMINATOR: u64 = 4;
 
 /// The live bookkeeping for one job.
 struct JobHandle {
@@ -110,6 +174,9 @@ struct JobHandle {
     port: u16,
     /// Whether a human watches this through a pty.
     human_view: HumanView,
+    /// Bytes discarded from the front of the capture by compaction. The
+    /// difference between a logical offset and a position in the file.
+    dropped: u64,
     /// The declared machine-lens sidecar, relative to the job's directory.
     machine_file: String,
     /// What is in it.
@@ -354,6 +421,8 @@ pub struct JobRegistry {
     /// Where terminal records are appended. Always present, so every registry
     /// has a history even when no durable sink was configured.
     audit: Arc<dyn AuditSink>,
+    /// How large a capture may grow before its oldest bytes are discarded.
+    capture_cap: u64,
     /// What this node is called, for the host gate.
     ///
     /// **Injected, never read from the OS.** Matching `hostname` would make the
@@ -377,6 +446,7 @@ impl JobRegistry {
             }),
             policy: None,
             audit: Arc::new(MemoryAuditLog::new()),
+            capture_cap: DEFAULT_CAPTURE_CAP,
             node: String::new(),
         })
     }
@@ -392,6 +462,7 @@ impl JobRegistry {
             }),
             policy: Some(policy),
             audit: Arc::new(MemoryAuditLog::new()),
+            capture_cap: DEFAULT_CAPTURE_CAP,
             node: String::new(),
         })
     }
@@ -460,6 +531,7 @@ impl JobRegistry {
                     port: record.port,
                     port_env: String::new(),
                     human_view: HumanView::Logs,
+                    dropped: record.dropped,
                     machine_file: record.machine_file.clone(),
                     machine_format: record.machine_format.clone(),
                     external: record.external,
@@ -484,6 +556,17 @@ impl JobRegistry {
         // `Drop`, so it cannot be moved out of.
         self.inner = Mutex::new(inner);
         Ok(self)
+    }
+
+    /// Bound how large a job's scrollback may grow.
+    pub fn with_capture_cap(mut self, bytes: u64) -> Self {
+        self.capture_cap = bytes;
+        self
+    }
+
+    /// Where a job's scrollback is kept.
+    pub fn capture_path(&self, id: &JobId) -> Option<PathBuf> {
+        self.locked().jobs.get(id).map(|h| h.capture.clone())
     }
 
     /// Name this node, for the host admission gate.
@@ -695,6 +778,7 @@ impl JobRegistry {
             port: 0,
             port_env: String::new(),
             human_view: HumanView::Logs,
+            dropped: 0,
             machine_file: String::new(),
             machine_format: String::new(),
             external: true,
@@ -1189,6 +1273,7 @@ impl JobRegistry {
             port: req.port.unwrap_or(0),
             port_env: req.port_env.clone(),
             human_view: req.human_view,
+            dropped: 0,
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
             external: false,
@@ -1460,6 +1545,7 @@ impl JobRegistry {
 
     /// Read output incrementally from `offset`, with the job's live status.
     pub fn tail(&self, id: &JobId, offset: u64) -> Result<Tail, JobError> {
+        let cap = self.capture_cap;
         // **Settle the job first.** Without this, a caller that only ever tails
         // — which is exactly what a polling remote caller does — would watch a
         // finished job report `Running` forever, because nothing else had
@@ -1502,16 +1588,33 @@ impl JobRegistry {
                 }
             }
 
+            // Bound the scrollback before reading it, so a long-running job
+            // cannot fill the disk between reads.
+            if let Ok(discarded) = compact(&handle.capture, cap)
+                && discarded > 0
+            {
+                handle.dropped += discarded;
+                let _ = persist(store, id, handle);
+            }
+
+            // Offsets are **logical**: what the caller holds counts bytes ever
+            // written, so it stays meaningful across a compaction. Translate it
+            // into a position in the file that is actually there now.
+            let dropped = handle.dropped;
+            let skipped = dropped.saturating_sub(offset);
+            let physical = offset.saturating_sub(dropped);
+
             // Read through the handle opened at job creation — never re-open by
             // path, which a swapped file could hijack.
             let mut file = handle.capture_read.try_clone().map_err(JobError::Io)?;
-            file.seek(SeekFrom::Start(offset)).map_err(JobError::Io)?;
+            file.seek(SeekFrom::Start(physical)).map_err(JobError::Io)?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).map_err(JobError::Io)?;
 
             (
                 Tail {
-                    next_offset: offset + bytes.len() as u64,
+                    next_offset: dropped + physical + bytes.len() as u64,
+                    skipped,
                     bytes,
                     status: handle.status.clone(),
                 },
