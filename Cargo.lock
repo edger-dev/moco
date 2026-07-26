@@ -873,7 +873,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "roam"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "facet 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
  "facet-core 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
@@ -890,7 +890,7 @@ dependencies = [
 [[package]]
 name = "roam-frame"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "bytes",
  "facet 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
@@ -900,7 +900,7 @@ dependencies = [
 [[package]]
 name = "roam-hash"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "blake3",
  "facet-core 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
@@ -911,7 +911,7 @@ dependencies = [
 [[package]]
 name = "roam-macros-parse"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -920,7 +920,7 @@ dependencies = [
 [[package]]
 name = "roam-schema"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "facet 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
  "facet-core 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
@@ -930,7 +930,7 @@ dependencies = [
 [[package]]
 name = "roam-service-macros"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -942,7 +942,7 @@ dependencies = [
 [[package]]
 name = "roam-session"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "async-channel",
  "facet 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
@@ -964,7 +964,7 @@ dependencies = [
 [[package]]
 name = "roam-task-local"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "pin-project-lite",
 ]
@@ -972,7 +972,7 @@ dependencies = [
 [[package]]
 name = "roam-wire"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam#6662970de374cde29dac6aba0b3a3abff1915790"
+source = "git+https://github.com/bearcove/roam?rev=6662970de374cde29dac6aba0b3a3abff1915790#6662970de374cde29dac6aba0b3a3abff1915790"
 dependencies = [
  "cobs",
  "facet 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",

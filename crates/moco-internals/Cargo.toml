@@ -14,5 +14,10 @@ workspace = true
 [dependencies]
 facet = "0.43.2"
 facet-styx = "1.0.1"
-roam = { git = "https://github.com/bearcove/roam", version = "3.0.0" }
+# Pinned by revision, not just by version. Without a rev this resolves against
+# roam's default branch, which has since moved to 0.10.0-rc.0 — so the `3.0.0`
+# constraint no longer matches and the resolve fails. moco itself kept building
+# only because its own Cargo.lock pinned this commit; a lockfile does not travel
+# to a consumer, so any repo depending on moco got an unbuildable graph.
+roam = { git = "https://github.com/bearcove/roam", rev = "6662970de374cde29dac6aba0b3a3abff1915790", version = "3.0.0" }
 semver = "1.0.27"
