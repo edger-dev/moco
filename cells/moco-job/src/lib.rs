@@ -27,7 +27,7 @@ pub use admission::WorktreePolicy;
 pub use audit::{AuditRecord, AuditSink, FileAuditLog, MemoryAuditLog, Verdict};
 pub use error::JobError;
 pub use job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
-pub use lens::{LensSource, MachineRead};
+pub use lens::{HumanView, LensSource, MachineRead};
 pub use lifecycle::{Autostart, Lifetime, RestartPolicy};
 pub use manifest::{MANIFEST_FILE, Manifest, ProcEntry};
 pub use port::{PortRange, PortRequest};

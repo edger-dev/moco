@@ -128,6 +128,8 @@ pub struct JobRequest {
     pub port: Option<u16>,
     /// The environment variable the port arrives in.
     pub port_env: String,
+    /// Whether a human watches this through a pty.
+    pub human_view: crate::lens::HumanView,
     /// The declared machine-lens sidecar, relative to the job's directory.
     pub machine_file: String,
     /// What is in it.
@@ -155,6 +157,7 @@ impl JobRequest {
             restart: RestartPolicy::Never,
             port: None,
             port_env: String::new(),
+            human_view: crate::lens::HumanView::Logs,
             machine_file: String::new(),
             machine_format: String::new(),
         }
@@ -181,6 +184,12 @@ impl JobRequest {
     pub fn with_port(mut self, port: u16, env: impl Into<String>) -> Self {
         self.port = Some(port);
         self.port_env = env.into();
+        self
+    }
+
+    /// Run this job under a pty, so it draws as it would for a person.
+    pub fn with_human_view(mut self, view: crate::lens::HumanView) -> Self {
+        self.human_view = view;
         self
     }
 

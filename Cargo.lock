@@ -295,6 +295,7 @@ dependencies = [
  "facet",
  "facet-styx",
  "moco-core",
+ "nix",
 ]
 
 [[package]]

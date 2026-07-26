@@ -19,6 +19,7 @@ use facet::Facet;
 
 use crate::admission::WorktreePolicy;
 use crate::error::JobError;
+use crate::lens::HumanView;
 use crate::lifecycle::{Autostart, Lifetime, RestartPolicy};
 use crate::port::{self, PortRequest};
 
@@ -75,6 +76,9 @@ pub struct ProcEntry {
     /// checked-in manifest stays usable on every machine.
     #[facet(default)]
     pub hosts: Vec<String>,
+    /// Whether a human watches this through a pty or as a log stream.
+    #[facet(default = HumanView::Logs)]
+    pub human_view: HumanView,
     /// A sidecar this job writes, relative to its working directory, holding a
     /// machine-readable view of what it found. Empty means none, and a reader
     /// falls back to scrollback.
@@ -226,6 +230,7 @@ mod tests {
                 port_env: String::new(),
                 worktree: WorktreePolicy::Unset,
                 hosts: Vec::new(),
+                human_view: HumanView::Logs,
                 machine_file: String::new(),
                 machine_format: String::new(),
             }],

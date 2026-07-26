@@ -10,7 +10,7 @@ use crate::admission;
 use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
-use crate::lens::{LensSource, MachineRead};
+use crate::lens::{HumanView, LensSource, MachineRead};
 use crate::lifecycle::{Lifetime, RestartPolicy};
 use crate::manifest::Manifest;
 use crate::port::{self, PortRange};
@@ -108,6 +108,8 @@ struct JobHandle {
     restarts: u64,
     /// The port the node allocated it, or 0 for none.
     port: u16,
+    /// Whether a human watches this through a pty.
+    human_view: HumanView,
     /// The declared machine-lens sidecar, relative to the job's directory.
     machine_file: String,
     /// What is in it.
@@ -252,17 +254,61 @@ fn outcome_of(handle: &JobHandle) -> Outcome {
 ///
 /// implements: argv-not-shell
 /// implements: job-durability-both-kill-vectors (file-backed stdio half)
+#[allow(clippy::too_many_arguments)]
 fn spawn_child(
     argv: &[String],
     cwd: &Path,
     capture: &File,
     port: Option<u16>,
     port_env: &str,
+    human_view: HumanView,
 ) -> Result<Child, JobError> {
     let (program, args) = argv.split_first().ok_or(JobError::EmptyArgv)?;
 
-    let stdout = capture.try_clone().map_err(JobError::Io)?;
-    let stderr = capture.try_clone().map_err(JobError::Io)?;
+    // Under a terminal lens the child's stdio is a **pty slave**, so `isatty` is
+    // true and the job draws as it would for a person. The master is pumped into
+    // the same capture file the log path uses, so scrollback stays file-backed —
+    // which is what keeps `tail`, durability and re-adoption working unchanged,
+    // and is why this does not reuse moco-tty's in-memory `ShellProcess`.
+    //
+    // Handing the slave to `Command` rather than forking by hand also keeps the
+    // child a `std::process::Child`, so every reap, kill and settle path is the
+    // same one the log lens uses. Two kinds of child in the registry would be
+    // two of everything that touches one.
+    let (stdout, stderr) = match human_view {
+        HumanView::Logs => (
+            Stdio::from(capture.try_clone().map_err(JobError::Io)?),
+            Stdio::from(capture.try_clone().map_err(JobError::Io)?),
+        ),
+        HumanView::Terminal => {
+            let pty = nix::pty::openpty(None, None)
+                .map_err(|e| JobError::Audit(format!("could not allocate a pty: {e}")))?;
+            let slave_err = pty.slave.try_clone().map_err(JobError::Io)?;
+            let master = pty.master;
+            let mut sink = capture.try_clone().map_err(JobError::Io)?;
+
+            // One pump per terminal job. It ends when the last slave fd closes,
+            // which happens when the child and our copies are gone — so this
+            // does not outlive the job it serves.
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let mut master = File::from(master);
+                let mut buf = [0u8; 8192];
+                loop {
+                    match master.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if sink.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
+            (Stdio::from(pty.slave), Stdio::from(slave_err))
+        }
+    };
 
     let mut command = Command::new(program);
     if let Some(port) = port {
@@ -275,8 +321,8 @@ fn spawn_child(
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .map_err(|source| JobError::Spawn {
             program: program.clone(),
@@ -413,6 +459,7 @@ impl JobRegistry {
                     restarts: record.restarts,
                     port: record.port,
                     port_env: String::new(),
+                    human_view: HumanView::Logs,
                     machine_file: record.machine_file.clone(),
                     machine_format: record.machine_format.clone(),
                     external: record.external,
@@ -552,6 +599,7 @@ impl JobRegistry {
         if let Some(port) = allocated {
             request = request.with_port(port, Manifest::port_env_of(entry));
         }
+        request = request.with_human_view(entry.human_view);
         if !entry.machine_file.is_empty() {
             request = request.with_machine_view(&entry.machine_file, &entry.machine_format);
         }
@@ -646,6 +694,7 @@ impl JobRegistry {
             restarts: 0,
             port: 0,
             port_env: String::new(),
+            human_view: HumanView::Logs,
             machine_file: String::new(),
             machine_format: String::new(),
             external: true,
@@ -1106,6 +1155,7 @@ impl JobRegistry {
             restart: req.restart,
             port: req.port,
             port_env: req.port_env.clone(),
+            human_view: req.human_view,
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
         };
@@ -1138,6 +1188,7 @@ impl JobRegistry {
             restarts: 0,
             port: req.port.unwrap_or(0),
             port_env: req.port_env.clone(),
+            human_view: req.human_view,
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
             external: false,
@@ -1158,6 +1209,7 @@ impl JobRegistry {
                     &handle.capture_write,
                     handle.port_request(),
                     handle.port_env_or_default(),
+                    handle.human_view,
                 ) {
                     Ok(child) => {
                         handle.pid = child.id();
@@ -1362,6 +1414,7 @@ impl JobRegistry {
                         &handle.capture_write,
                         handle.port_request(),
                         handle.port_env_or_default(),
+                        handle.human_view,
                     ) {
                         Ok(child) => {
                             handle.pid = child.id();

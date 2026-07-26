@@ -171,3 +171,115 @@ fn a_sidecar_path_cannot_escape_the_jobs_directory() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **The point of the human lens.** Under a terminal view the job's stdio is a
+/// pty, so `isatty` is true — and many tools emit something entirely different
+/// when they think they are talking to a pipe.
+#[test]
+fn a_terminal_view_job_sees_a_tty() {
+    let ws = workspace(
+        "tty",
+        r#"proc ({name check, argv (sh -c "test -t 1 && echo TTY || echo PIPE"), human_view @Terminal})"#,
+    );
+    let reg = registry();
+    let caller = Caller::Scoped(Scope::resolve(&ws));
+
+    let id = reg.start_named("check", &caller).expect("start");
+    reg.wait(&id).expect("wait");
+
+    // The pump is a thread; give it a moment to drain the master.
+    let mut seen = String::new();
+    for _ in 0..200 {
+        seen = String::from_utf8_lossy(&reg.tail(&id, 0).expect("tail").bytes).into_owned();
+        if seen.contains("TTY") || seen.contains("PIPE") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(seen.contains("TTY"), "expected a tty, got: {seen:?}");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The default is a log stream, and there `isatty` is false — so a tool takes
+/// its non-interactive path unless a workspace asked for otherwise.
+#[test]
+fn the_default_view_is_not_a_tty() {
+    let ws = workspace(
+        "notty",
+        r#"proc ({name check, argv (sh -c "test -t 1 && echo TTY || echo PIPE")})"#,
+    );
+    let reg = registry();
+    let caller = Caller::Scoped(Scope::resolve(&ws));
+
+    let id = reg.start_named("check", &caller).expect("start");
+    reg.wait(&id).expect("wait");
+    let seen = String::from_utf8_lossy(&reg.tail(&id, 0).expect("tail").bytes).into_owned();
+    assert!(seen.contains("PIPE"), "expected a pipe, got: {seen:?}");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **Scrollback stays file-backed under a pty.** The master is pumped into the
+/// same capture file the log lens writes, which is what keeps `tail`, the
+/// durable record and re-adoption working the same for both views.
+#[test]
+fn terminal_output_still_lands_in_the_capture_file() {
+    let ws = workspace(
+        "captured",
+        r#"proc ({name check, argv (sh -c "echo drawn-under-a-pty"), human_view @Terminal})"#,
+    );
+    let reg = registry();
+    let caller = Caller::Scoped(Scope::resolve(&ws));
+
+    let id = reg.start_named("check", &caller).expect("start");
+    reg.wait(&id).expect("wait");
+
+    let mut seen = String::new();
+    for _ in 0..200 {
+        seen = String::from_utf8_lossy(&reg.tail(&id, 0).expect("tail").bytes).into_owned();
+        if seen.contains("drawn-under-a-pty") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        seen.contains("drawn-under-a-pty"),
+        "a pty job's scrollback must be readable the same way: {seen:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A terminal-view job with a machine view still answers through the machine
+/// view: the two channels are independent, and the consumer picks per read.
+#[test]
+fn both_lenses_serve_one_job_independently() {
+    let ws = workspace(
+        "both",
+        r#"proc ({name check,
+                 argv (sh -c "echo NOISE; echo '{\"ok\":true}' > .diagnostics"),
+                 human_view @Terminal, machine_file ".diagnostics", machine_format "json"})"#,
+    );
+    let reg = registry();
+    let caller = Caller::Scoped(Scope::resolve(&ws));
+
+    let id = reg.start_named("check", &caller).expect("start");
+    reg.wait(&id).expect("wait");
+
+    let read = reg.machine(&id, 0).expect("machine");
+    assert_eq!(read.source, LensSource::Machine);
+    assert!(String::from_utf8_lossy(&read.bytes).contains("\"ok\""));
+
+    let mut human = String::new();
+    for _ in 0..200 {
+        human = String::from_utf8_lossy(&reg.tail(&id, 0).expect("tail").bytes).into_owned();
+        if human.contains("NOISE") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(human.contains("NOISE"), "the human channel is still there");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
