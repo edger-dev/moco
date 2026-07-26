@@ -39,6 +39,7 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         handle.restart,
         handle.restarts,
         handle.port,
+        handle.external,
         handle.pid,
         handle.pid_start,
         &handle.capture,
@@ -104,6 +105,8 @@ struct JobHandle {
     restarts: u64,
     /// The port the node allocated it, or 0 for none.
     port: u16,
+    /// Handed over rather than started here.
+    external: bool,
     /// The environment variable the port arrives in.
     port_env: String,
     /// True when this handle was rebuilt from an on-disk record rather than
@@ -403,6 +406,7 @@ impl JobRegistry {
                     restarts: record.restarts,
                     port: record.port,
                     port_env: String::new(),
+                    external: record.external,
                     pid: record.pid,
                     pid_start: record.pid_start,
                     adopted: true,
@@ -558,6 +562,90 @@ impl JobRegistry {
             .filter(|p| *p != 0)
     }
 
+    /// Was this job handed over rather than started here?
+    pub fn is_external(&self, id: &JobId) -> bool {
+        self.locked()
+            .jobs
+            .get(id)
+            .map(|h| h.external)
+            .unwrap_or(false)
+    }
+
+    /// Take an already-running process into the registry.
+    ///
+    /// **This is the re-adopt path, parameterized.** Re-adoption after a daemon
+    /// restart and hand-over from outside are the same operation — read the
+    /// pid's start time, build a detached entry with no child handle, persist,
+    /// and let the ordinary liveness probe watch it — so they share one
+    /// implementation rather than two that drift.
+    ///
+    /// With `command = None` the entry is **observe-only**: it is listed, its
+    /// state comes from liveness, it settles when the pid dies, and the
+    /// supervisor never respawns it. That last part matters — an observe-only
+    /// entry cannot fight a human restarting that process by hand.
+    ///
+    /// It exists because of a bootstrap loop: the transport cannot be a
+    /// supervisor-started job, since the management plane reaches the supervisor
+    /// *through* it. The goal here is visibility, not supervision.
+    ///
+    /// implements: adopt-is-readopt-parameterized
+    pub fn adopt(
+        &self,
+        scope: Scope,
+        command: Option<Vec<String>>,
+        pid: u32,
+    ) -> Result<JobId, JobError> {
+        // Nothing there is nothing to adopt: an entry for a process that was
+        // never running would report a state it could not have.
+        let Some(pid_start) = procfs::start_time(pid) else {
+            return Err(JobError::NotRunning { pid });
+        };
+
+        let mut inner = self.locked();
+        let id = inner.store.mint()?;
+        let capture = inner.store.capture_path(&id.0);
+        let capture_write = File::options()
+            .create(true)
+            .append(true)
+            .open(&capture)
+            .map_err(JobError::Io)?;
+        let capture_read = File::open(&capture).map_err(JobError::Io)?;
+
+        let handle = JobHandle {
+            child: None,
+            capture,
+            capture_write,
+            capture_read,
+            status: JobStatus::Running,
+            deadline: None,
+            started: Instant::now(),
+            killed: false,
+            pending: None,
+            verdict: Verdict::Ungoverned,
+            resolved_cwd: PathBuf::from("/"),
+            argv: command.unwrap_or_default(),
+            audited: false,
+            scope,
+            name: None,
+            lifetime: Lifetime::Service,
+            // Nothing to respawn from unless a command was captured, and even
+            // then the declaration is what a restart re-reads.
+            restart: RestartPolicy::Never,
+            restarts: 0,
+            port: 0,
+            port_env: String::new(),
+            external: true,
+            pid,
+            pid_start,
+            // Not our child: tracked by liveness, like anything re-adopted.
+            adopted: true,
+        };
+
+        persist(&inner.store, &id, &handle)?;
+        inner.jobs.insert(id.clone(), handle);
+        Ok(id)
+    }
+
     /// A job's current status.
     pub fn status_of(&self, id: &JobId) -> Option<JobStatus> {
         self.locked().jobs.get(id).map(|h| h.status.clone())
@@ -686,6 +774,38 @@ impl JobRegistry {
             }
         }
         restarted
+    }
+
+    /// Remove terminal entries, returning how many went.
+    ///
+    /// **Only terminal ones, and it never signals anything.** A crashed job has
+    /// to linger so you can see *that* it died and read its last output, so
+    /// pruning is something a person asks for rather than something that
+    /// happens. And a live job is left strictly alone: tombstone cleanup and
+    /// kill-all are different verbs, and conflating them is how someone loses a
+    /// dev server by tidying up. Stop it first if that is what you meant.
+    ///
+    /// Scope follows the same split as every other write — a session clears its
+    /// own workspace, the console clears globally.
+    ///
+    /// implements: reads-global-writes-own-workspace
+    pub fn clear(&self, caller: &Caller) -> Result<usize, JobError> {
+        let mut inner = self.locked();
+        let Inner { jobs, store } = &mut *inner;
+
+        let doomed: Vec<JobId> = jobs
+            .iter()
+            .filter(|(_, h)| h.status.is_terminal() && caller.may_write(&h.scope))
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in &doomed {
+            jobs.remove(id);
+            // The durable record goes too, or a re-adopting daemon would bring
+            // back exactly what was just cleared.
+            let _ = store.remove(&id.0);
+        }
+        Ok(doomed.len())
     }
 
     /// Every job this registry knows about, in creation order.
@@ -934,6 +1054,7 @@ impl JobRegistry {
             restarts: 0,
             port: req.port.unwrap_or(0),
             port_env: req.port_env.clone(),
+            external: false,
             pid: 0,
             pid_start: 0,
             adopted: false,

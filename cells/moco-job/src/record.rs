@@ -68,6 +68,12 @@ pub struct JobRecord {
     pub deadline_ms: u64,
     /// Whether its terminal record has already reached the audit.
     pub audited: bool,
+    /// True when this job was **handed over** rather than started here.
+    ///
+    /// Persisted, so re-adoption preserves it: "we were given this" and "we
+    /// started this and detached" are different facts, and only the first means
+    /// something else may own its lifecycle.
+    pub external: bool,
 }
 
 impl JobRecord {
@@ -303,6 +309,7 @@ impl RecordStore {
             restart: RestartPolicy::Never,
             restarts: 0,
             port,
+            external: false,
             pid: 0,
             pid_start: 0,
             capture: String::new(),
@@ -336,6 +343,7 @@ pub(crate) fn record_of(
     restart: RestartPolicy,
     restarts: u64,
     port: u16,
+    external: bool,
     pid: u32,
     pid_start: u64,
     capture: &Path,
@@ -354,6 +362,7 @@ pub(crate) fn record_of(
         restart,
         restarts,
         port,
+        external,
         pid,
         pid_start,
         capture: capture.to_string_lossy().into_owned(),

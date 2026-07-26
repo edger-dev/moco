@@ -24,6 +24,8 @@ pub enum JobError {
         manifest: String,
         declared: Vec<String>,
     },
+    /// Nothing is running under that pid.
+    NotRunning { pid: u32 },
     /// A declared job was refused by a start-time policy gate.
     ///
     /// implements: admission-gates-worktree-and-host
@@ -90,6 +92,11 @@ impl fmt::Display for JobError {
                 } else {
                     format!(" (it declares: {})", declared.join(", "))
                 }
+            ),
+            JobError::NotRunning { pid } => write!(
+                f,
+                "no process is running as pid {pid}, so there is nothing to adopt. \
+                 An entry for it would report a state it could not have."
             ),
             JobError::Refused { name, refusal } => {
                 write!(f, "'{name}' was not started here: {refusal}")
