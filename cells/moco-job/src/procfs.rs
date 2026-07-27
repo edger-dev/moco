@@ -48,6 +48,54 @@ pub fn start_time(pid: u32) -> Option<u64> {
     stat_fields(pid).map(|(_, start)| start)
 }
 
+/// Assumed page size, for turning the kernel's RSS-in-pages into bytes.
+///
+/// 4 KiB on every platform this runs on. Hard-coded rather than reached for
+/// through another dependency because this is a **sample, not an invoice**:
+/// resource reporting here is advisory by contract, and being wrong by a page
+/// size factor on an exotic kernel would be visible and harmless.
+const PAGE_SIZE: u64 = 4096;
+
+/// A point-in-time reading of what a process is consuming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    /// CPU time consumed since the process started, in clock ticks. A *rate*
+    /// needs two of these; one on its own says nothing about load.
+    pub cpu_ticks: u64,
+    pub rss_bytes: u64,
+}
+
+/// What `pid` is consuming right now.
+///
+/// Read from `/proc/<pid>/stat`: fields 14 and 15 (user and system time) and
+/// field 24 (resident set size, in pages). Positional like everything else in
+/// that file, so the scan starts after the last `')'` — a process name may
+/// contain spaces and parentheses.
+#[cfg(target_os = "linux")]
+pub fn usage(pid: u32) -> Option<Usage> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.get(stat.rfind(')').map(|i| i + 1)?..)?;
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    // Fields from 3 onward, so field N is at index N-3.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    let rss_pages: u64 = fields.get(21)?.parse().ok()?;
+    Some(Usage {
+        cpu_ticks: utime + stime,
+        rss_bytes: rss_pages * PAGE_SIZE,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn usage(_pid: u32) -> Option<Usage> {
+    None
+}
+
+/// Clock ticks per second, for turning a tick delta into a percentage.
+///
+/// 100 on Linux effectively everywhere; same reasoning as `PAGE_SIZE`.
+pub const TICKS_PER_SECOND: u64 = 100;
+
 /// Whether the process recorded as `(pid, recorded_start)` is still running.
 ///
 /// On a platform with no probe this is `Unsupported`, never `Alive`: a job whose

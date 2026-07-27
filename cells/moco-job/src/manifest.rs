@@ -89,6 +89,15 @@ pub struct ProcEntry {
     /// never inferred" from turning into a format zoo in here.
     #[facet(default)]
     pub machine_format: String,
+    /// Advisory CPU ceiling, percent of one core; 400 means four cores' worth.
+    /// Crossing it is **reported, never enforced** — the field exists from the
+    /// start so that adding enforcement later is additive rather than a schema
+    /// change every manifest has to follow.
+    #[facet(default)]
+    pub cpu_pct: u32,
+    /// Advisory resident-memory ceiling in MiB. Reported, never enforced.
+    #[facet(default)]
+    pub mem_mb: u64,
 }
 
 /// Everything one workspace declares.
@@ -233,6 +242,8 @@ mod tests {
                 human_view: HumanView::Logs,
                 machine_file: String::new(),
                 machine_format: String::new(),
+                cpu_pct: 0,
+                mem_mb: 0,
             }],
         };
         let text = facet_styx::to_string(&manifest).expect("encode");

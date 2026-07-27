@@ -21,6 +21,7 @@ pub mod record;
 pub mod registry;
 pub mod rules;
 pub mod scope;
+pub mod stats;
 pub mod wire;
 
 pub use admission::WorktreePolicy;
@@ -35,8 +36,10 @@ pub use preflight::Preflight;
 pub use procfs::{Liveness, liveness};
 pub use record::{JobRecord, RecordStore};
 pub use registry::JobRegistry;
+pub use registry::SAMPLE_HISTORY;
 pub use rules::{Decision, Disposition, NodePolicy, RuleSet, SeedConfig};
 pub use scope::{Caller, Scope};
+pub use stats::{Breach, Limits, Sample, Stats};
 pub use wire::{METHODS, WireError, dispatch};
 
 use moco_core::{Cell, CellSpec, Func, FuncSpec};

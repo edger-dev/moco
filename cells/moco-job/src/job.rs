@@ -99,6 +99,12 @@ pub enum JobStatus {
 impl JobStatus {
     /// A terminal state is any state the job will not leave. A pending job is
     /// *not* terminal — it is waiting on a decision.
+    /// Is this job currently executing? The complement of neither `is_terminal`
+    /// nor pending — a job awaiting approval is running nothing.
+    pub fn is_running(&self) -> bool {
+        matches!(self, JobStatus::Running)
+    }
+
     pub fn is_terminal(&self) -> bool {
         !matches!(self, JobStatus::Running | JobStatus::PendingApproval)
     }
@@ -134,6 +140,8 @@ pub struct JobRequest {
     pub machine_file: String,
     /// What is in it.
     pub machine_format: String,
+    /// Advisory resource ceilings. Crossing one is reported, never acted on.
+    pub limits: crate::stats::Limits,
     /// Optional execution deadline. A job still running past it lands
     /// `TimedOut` when it is next awaited (`wait` / `run`). v1 has no background
     /// reaper, so a job that is never awaited is not force-expired — a full
@@ -160,7 +168,19 @@ impl JobRequest {
             human_view: crate::lens::HumanView::Logs,
             machine_file: String::new(),
             machine_format: String::new(),
+            limits: crate::stats::Limits::default(),
         }
+    }
+
+    /// Declare advisory resource ceilings.
+    ///
+    /// Crossing one is **reported and nothing more** — no throttle, no kill.
+    /// Enforcement would need cgroup delegation this does not have, and calling
+    /// it by the same name as monitoring is how a supervisor ends up killing
+    /// the job someone was trying to diagnose.
+    pub fn with_limits(mut self, limits: crate::stats::Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     pub fn with_deadline(mut self, deadline: Duration) -> Self {

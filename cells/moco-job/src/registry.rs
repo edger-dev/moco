@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ use crate::procfs::{self, Liveness};
 use crate::record::{RecordStore, record_of};
 use crate::rules::{Decision, Disposition, NodePolicy};
 use crate::scope::{Caller, Scope};
+use crate::stats::{Breach, Limits, Sample, Stats};
 
 /// Discard the oldest part of a capture that has outgrown its cap.
 ///
@@ -97,8 +98,17 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         &handle.capture,
         handle.deadline.map(|d| d.as_millis() as u64).unwrap_or(0),
         handle.audited,
+        handle.limits,
     ))
 }
+
+/// How many recent samples a job keeps.
+///
+/// Sixty, which at the daemon's one-second tick is the last minute. Deliberately
+/// short: this answers *what is happening now*, and a supervisor that grew into
+/// a metrics store would be keeping data nobody queries at a cost everybody
+/// pays. Anything wanting history should scrape this and store it elsewhere.
+pub const SAMPLE_HISTORY: usize = 60;
 
 /// How often `wait` polls a running child for exit / deadline / decision.
 const POLL: Duration = Duration::from_millis(10);
@@ -120,6 +130,13 @@ const KEEP_DENOMINATOR: u64 = 4;
 
 /// The live bookkeeping for one job.
 struct JobHandle {
+    /// Advisory ceilings declared for this job.
+    limits: Limits,
+    /// Recent resource readings, oldest first, bounded at [`SAMPLE_HISTORY`].
+    samples: VecDeque<Sample>,
+    /// The previous raw CPU total, so the next sample can be turned into a
+    /// rate. `None` until the job has been sampled once.
+    last_cpu: Option<(u64, Instant)>,
     /// The running child, taken once the job reaches a terminal state.
     ///
     /// `None` with a `Running` status means the job was **re-adopted**: it is
@@ -509,6 +526,9 @@ impl JobRegistry {
             jobs.insert(
                 id,
                 JobHandle {
+                    limits: record.limits,
+                    samples: VecDeque::new(),
+                    last_cpu: None,
                     child: None,
                     capture,
                     capture_write,
@@ -683,6 +703,10 @@ impl JobRegistry {
             request = request.with_port(port, Manifest::port_env_of(entry));
         }
         request = request.with_human_view(entry.human_view);
+        request = request.with_limits(Limits {
+            cpu_pct: entry.cpu_pct,
+            mem_mb: entry.mem_mb,
+        });
         if !entry.machine_file.is_empty() {
             request = request.with_machine_view(&entry.machine_file, &entry.machine_format);
         }
@@ -755,6 +779,9 @@ impl JobRegistry {
         let capture_read = File::open(&capture).map_err(JobError::Io)?;
 
         let handle = JobHandle {
+            limits: Limits::default(),
+            samples: VecDeque::new(),
+            last_cpu: None,
             child: None,
             capture,
             capture_write,
@@ -934,6 +961,11 @@ impl JobRegistry {
     pub fn supervise(&self) -> Vec<JobId> {
         // A policy cannot act on a state nobody has observed.
         self.settle_all();
+        // Sampling rides the tick that already exists rather than owning a
+        // timer of its own. The interval between calls *is* the sampling
+        // interval, which is why a rate is computed from observed elapsed time
+        // rather than an assumed period.
+        self.sample_all();
 
         let due: Vec<(JobId, Scope, String)> = {
             let inner = self.locked();
@@ -1017,6 +1049,91 @@ impl JobRegistry {
             // Reading from the end: this is for the status, not the bytes.
             let _ = self.tail(&id, u64::MAX);
         }
+    }
+
+    /// Take one resource reading of every live job.
+    ///
+    /// Called from `supervise`, so an ordinary daemon needs no separate timer;
+    /// exposed publicly so a caller wanting a reading *now* can force one
+    /// rather than waiting out a tick.
+    ///
+    /// A job with nothing running contributes no sample. That is not the same
+    /// as a zero reading, and conflating them would show a finished job sitting
+    /// quietly at 0% as though it were idling rather than gone.
+    pub fn sample_all(&self) {
+        let now = Instant::now();
+        let at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut inner = self.locked();
+        for handle in inner.jobs.values_mut() {
+            if !handle.status.is_running() || handle.pid == 0 {
+                continue;
+            }
+            let Some(usage) = procfs::usage(handle.pid) else {
+                // The process went away between the status check and the read.
+                // Nothing to report, and inventing a zero would be a lie about
+                // a job that is simply gone.
+                continue;
+            };
+
+            // A rate needs two points. The first reading establishes the
+            // baseline and reports no load, because a total is not a rate and
+            // presenting one as the other would show every freshly sampled job
+            // spiking to whatever it had accumulated since it started.
+            let cpu_pct = match handle.last_cpu {
+                Some((previous_ticks, previous_at)) => {
+                    let elapsed = now.duration_since(previous_at).as_secs_f64();
+                    let ticks = usage.cpu_ticks.saturating_sub(previous_ticks) as f64;
+                    if elapsed > 0.0 {
+                        ((ticks / procfs::TICKS_PER_SECOND as f64) / elapsed * 100.0).round() as u32
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            };
+            handle.last_cpu = Some((usage.cpu_ticks, now));
+
+            if handle.samples.len() == SAMPLE_HISTORY {
+                handle.samples.pop_front();
+            }
+            handle.samples.push_back(Sample {
+                at_unix_ms,
+                cpu_pct,
+                rss_bytes: usage.rss_bytes,
+            });
+        }
+    }
+
+    /// What this job has been consuming, and whether that crosses what was
+    /// declared.
+    ///
+    /// **Reporting only.** A breach here has no effect on the job whatsoever:
+    /// nothing throttles it, nothing kills it. Enforcement needs cgroup
+    /// delegation this does not have, and shipping a half-enforcement that
+    /// killed the job someone was mid-diagnosis on would be worse than none.
+    pub fn stats(&self, id: &JobId) -> Result<Stats, JobError> {
+        let inner = self.locked();
+        let handle = inner
+            .jobs
+            .get(id)
+            .ok_or_else(|| JobError::NotFound(id.clone()))?;
+        let breach = handle
+            .samples
+            .back()
+            .map(|s| handle.limits.breached_by(s))
+            .unwrap_or(Breach {
+                cpu: false,
+                memory: false,
+            });
+        Ok(Stats {
+            samples: handle.samples.iter().copied().collect(),
+            limits: handle.limits,
+            breach,
+        })
     }
 
     /// Every job this registry knows about, in creation order.
@@ -1242,9 +1359,13 @@ impl JobRegistry {
             human_view: req.human_view,
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
+            limits: req.limits,
         };
 
         let mut handle = JobHandle {
+            limits: request.limits,
+            samples: VecDeque::new(),
+            last_cpu: None,
             child: None,
             capture,
             capture_write,

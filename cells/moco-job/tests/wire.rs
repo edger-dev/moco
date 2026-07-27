@@ -264,3 +264,40 @@ fn adopt_is_not_reachable_over_the_wire() {
     let err = wire::dispatch(&reg, "adopt", b"{}").expect_err("must not be dispatchable");
     assert!(err.to_string().contains("unknown method"), "got: {err}");
 }
+
+/// Resource readings cross the wire, and a caller can tell "not sampled yet"
+/// from "idle" — the reply carries no samples rather than a fabricated zero.
+#[test]
+#[allow(clippy::expect_used, reason = "a failure here is a broken harness")]
+fn stats_round_trip_over_bytes() {
+    let reg = registry();
+
+    let request = wire::encode(&StartRequest {
+        argv: vec!["sleep".into(), "5".into()],
+        cwd: root().to_string_lossy().into_owned(),
+        deadline_ms: 0,
+        caller: wire::WireCaller::Console,
+    })
+    .expect("encode start");
+    let reply = wire::dispatch(&reg, "start", &request).expect("start dispatches");
+    let started: wire::StartReply = wire::decode(&reply).expect("decode start reply");
+
+    let ask = wire::encode(&wire::StatsRequest {
+        id: started.id.clone(),
+    })
+    .expect("encode stats");
+
+    // Before any sampling has happened there is nothing to report.
+    let reply = wire::dispatch(&reg, "stats", &ask).expect("stats dispatches");
+    let stats: wire::StatsReply = wire::decode(&reply).expect("decode stats reply");
+    assert!(stats.samples.is_empty());
+    assert!(!stats.breach.any());
+
+    reg.sample_all();
+    let reply = wire::dispatch(&reg, "stats", &ask).expect("stats dispatches");
+    let stats: wire::StatsReply = wire::decode(&reply).expect("decode stats reply");
+    let latest = stats.samples.last().expect("one sample after sampling");
+    assert!(latest.rss_bytes > 0, "a live process occupies memory");
+
+    let _ = reg.kill(&moco_job::JobId(started.id), &moco_job::Caller::Console);
+}

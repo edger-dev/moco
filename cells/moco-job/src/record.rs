@@ -38,6 +38,10 @@ static MINT_SEQ: AtomicU64 = AtomicU64::new(0);
 /// unambiguous and keeps the record a flat Styx line.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct JobRecord {
+    /// Advisory ceilings, so a re-adopted job keeps reporting against what its
+    /// declaration asked for.
+    #[facet(default)]
+    pub limits: crate::stats::Limits,
     pub id: String,
     pub argv: Vec<String>,
     pub cwd: String,
@@ -307,6 +311,7 @@ impl RecordStore {
     ) -> Result<(), JobError> {
         let id = self.mint()?;
         self.put(&JobRecord {
+            limits: crate::stats::Limits::default(),
             id: id.0,
             argv: Vec::new(),
             cwd: String::new(),
@@ -364,8 +369,10 @@ pub(crate) fn record_of(
     capture: &Path,
     deadline_ms: u64,
     audited: bool,
+    limits: crate::stats::Limits,
 ) -> JobRecord {
     JobRecord {
+        limits,
         id: id.0.clone(),
         argv: argv.to_vec(),
         cwd: cwd.to_string_lossy().into_owned(),

@@ -108,6 +108,23 @@ pub struct MachineReply {
     pub next_offset: u64,
 }
 
+/// Read a job's recent resource history.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct StatsRequest {
+    pub id: String,
+}
+
+/// What a job has been consuming, and what it was declared to be allowed.
+///
+/// A breach here is **information**. Nothing on either side of this wire acts
+/// on it.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct StatsReply {
+    pub samples: Vec<crate::stats::Sample>,
+    pub limits: crate::stats::Limits,
+    pub breach: crate::stats::Breach,
+}
+
 /// Wait for a job to reach a terminal state.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct WaitRequest {
@@ -315,6 +332,18 @@ pub fn dispatch(
                 },
             )
         }
+        "stats" => {
+            let req: StatsRequest = read(method, request)?;
+            let out = registry.stats(&JobId(req.id))?;
+            write(
+                method,
+                &StatsReply {
+                    samples: out.samples,
+                    limits: out.limits,
+                    breach: out.breach,
+                },
+            )
+        }
         "machine" => {
             let req: MachineRequest = read(method, request)?;
             let out = registry.machine(&JobId(req.id), req.offset)?;
@@ -405,6 +434,7 @@ pub const METHODS: &[&str] = &[
     "clear",
     "tail",
     "machine",
+    "stats",
     "wait",
     "kill",
     "list",

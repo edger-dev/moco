@@ -252,3 +252,29 @@ fn everything_but_name_and_argv_defaults() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// implements: resource-limits-report-never-enforce
+#[test]
+#[allow(clippy::expect_used, reason = "a failure here is a broken harness")]
+fn advisory_limits_are_declarable_and_default_to_unstated() {
+    let ws = workspace(
+        "limits",
+        Some(
+            r#"proc (
+              {name hungry, argv (sleep 1), cpu_pct 400, mem_mb 2048},
+              {name modest, argv (sleep 1)}
+            )"#,
+        ),
+    );
+
+    let manifest = Manifest::load(&ws).expect("load");
+    let hungry = manifest.get("hungry").expect("declared");
+    assert_eq!(hungry.cpu_pct, 400);
+    assert_eq!(hungry.mem_mb, 2048);
+
+    // Saying nothing must mean no ceiling, not a ceiling of zero — a manifest
+    // written before these fields existed must keep behaving identically.
+    let modest = manifest.get("modest").expect("declared");
+    assert_eq!(modest.cpu_pct, 0);
+    assert_eq!(modest.mem_mb, 0);
+}
