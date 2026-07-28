@@ -16,8 +16,10 @@ moco-core = { workspace = true }
 facet = { workspace = true }
 facet-styx = { workspace = true }
 
-# Only for `openpty`, whose nix wrapper is safe — this crate adds no `unsafe`.
+# For `openpty` and for signalling a job's **process group**. Both nix wrappers
+# are safe, and putting a child in its own group uses `CommandExt::process_group`
+# — also safe — so this crate still adds no `unsafe`.
 # The pty's *slave* is handed to `std::process::Command` as stdio, so every
 # existing child, reap and kill path keeps working unchanged.
-nix = { version = "0.31", features = ["term"] }
+nix = { version = "0.31", features = ["term", "signal"] }
 vt100 = "0.16.2"

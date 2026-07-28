@@ -20,6 +20,7 @@ use crate::record::{RecordStore, record_of};
 use crate::rules::{Decision, Disposition, NodePolicy};
 use crate::scope::{Caller, Scope};
 use crate::stats::{Breach, Limits, Sample, Stats};
+use nix::sys::signal::Signal;
 
 /// Discard the oldest part of a capture that has outgrown its cap.
 ///
@@ -121,8 +122,46 @@ pub const SAMPLE_HISTORY: usize = 60;
 /// here — compiler diagnostics and test output, which 80 columns folds into an
 /// unreadable zigzag. A declaration-level override is the escape hatch when a
 /// job needs a specific size.
+/// How long a stopped job is given to exit on its own.
+///
+/// A service asked to stop has real work to do — flush a buffer, remove a
+/// socket, finish a request — and the difference between a clean restart and a
+/// corrupted state file is whether it was allowed to. Five seconds is long
+/// enough for that and short enough that a stuck job is not mistaken for a
+/// working one.
+pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(5);
+
 pub const SCREEN_COLS: u16 = 120;
 pub const SCREEN_ROWS: u16 = 40;
+
+/// Signal a job's whole process group.
+///
+/// **Guarded by liveness, and that guard is the point.** Signalling a stale pid
+/// is a mistake; signalling a stale process *group* is a wide one, because the
+/// pid may have been reused by something that has since started children of its
+/// own. So the recorded start time is checked first, exactly as every other
+/// probe does, and a pid that is not this job is left alone.
+///
+/// Falls back to the pid itself if the group is gone — a child that outlived its
+/// group leader is still this job's child, and refusing to signal it because the
+/// group is empty would leave it running.
+///
+/// implements: a-job-is-a-process-group
+fn signal_group(pid: u32, pid_start: u64, signal: nix::sys::signal::Signal) -> bool {
+    use nix::sys::signal::{kill as signal_pid, killpg};
+    use nix::unistd::Pid;
+
+    if pid == 0 || procfs::liveness(pid, pid_start) != Liveness::Alive {
+        return false;
+    }
+    let target = Pid::from_raw(pid as i32);
+    // The group first: that is the whole tree. `ESRCH` here means the group is
+    // already empty, which is not a reason to leave the leader running.
+    if killpg(target, signal).is_ok() {
+        return true;
+    }
+    signal_pid(target, signal).is_ok()
+}
 
 /// Build a job request from a manifest entry.
 ///
@@ -224,6 +263,13 @@ struct JobHandle {
     /// Set when the job was explicitly killed, so `wait` reports `Killed`
     /// rather than an exit code.
     killed: bool,
+    /// When the polite signal was sent, so the supervisor knows when the grace
+    /// period has run out. `None` until a stop is asked for.
+    ///
+    /// Deliberately **not** persisted: after a daemon restart there is no
+    /// pending escalation to resume, and a job still alive then is one the
+    /// operator can ask to stop again.
+    kill_asked: Option<Instant>,
     /// The request held back while the job awaits approval. `Some` exactly when
     /// the status is `PendingApproval`; this is what a decision spawns.
     pending: Option<JobRequest>,
@@ -509,6 +555,18 @@ fn spawn_child(
         // `@MOCO_PORT` argv token instead, substituted before we get here.
         command.env(port_env, port.to_string());
     }
+    // **Its own process group, so a stop reaches the whole tree.** A job is
+    // very often a shell wrapping the real program; signalling only the process
+    // we spawned leaves that program running, and the job reads as stopped
+    // while still holding its port. `process_group` is the safe, stable way to
+    // do this — no `pre_exec`, so this crate still contains no `unsafe`.
+    //
+    // Zero means "lead a new group", which makes the child's pgid equal its
+    // pid. That is what lets the group be signalled later from the pid alone,
+    // including for a job re-adopted after a daemon restart.
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+
     command
         .args(args)
         .current_dir(cwd)
@@ -548,6 +606,9 @@ pub struct JobRegistry {
     audit: Arc<dyn AuditSink>,
     /// How large a capture may grow before its oldest bytes are discarded.
     capture_cap: u64,
+    /// How long a stopped job is given to exit on its own before the signal is
+    /// escalated.
+    kill_grace: Duration,
     /// What this node is called, for the host gate.
     ///
     /// **Injected, never read from the OS.** Matching `hostname` would make the
@@ -572,6 +633,7 @@ impl JobRegistry {
             policy: None,
             audit: Arc::new(MemoryAuditLog::new()),
             capture_cap: DEFAULT_CAPTURE_CAP,
+            kill_grace: DEFAULT_KILL_GRACE,
             node: String::new(),
         })
     }
@@ -588,6 +650,7 @@ impl JobRegistry {
             policy: Some(policy),
             audit: Arc::new(MemoryAuditLog::new()),
             capture_cap: DEFAULT_CAPTURE_CAP,
+            kill_grace: DEFAULT_KILL_GRACE,
             node: String::new(),
         })
     }
@@ -647,6 +710,7 @@ impl JobRegistry {
                         .then(|| Duration::from_millis(record.deadline_ms)),
                     started: Instant::now(),
                     killed: false,
+                    kill_asked: None,
                     pending: None,
                     verdict: record.verdict,
                     resolved_cwd: PathBuf::from(&record.cwd),
@@ -690,6 +754,12 @@ impl JobRegistry {
     /// Bound how large a job's scrollback may grow.
     pub fn with_capture_cap(mut self, bytes: u64) -> Self {
         self.capture_cap = bytes;
+        self
+    }
+
+    /// How long a stopped job may take to exit before it is forced.
+    pub fn with_kill_grace(mut self, grace: Duration) -> Self {
+        self.kill_grace = grace;
         self
     }
 
@@ -882,6 +952,18 @@ impl JobRegistry {
         Ok(started)
     }
 
+    /// The pid of the process this job runs as, if it has one.
+    ///
+    /// It is also the job's **process group id**, since every job leads its own
+    /// group.
+    pub fn pid_of(&self, id: &JobId) -> Option<u32> {
+        self.locked()
+            .jobs
+            .get(id)
+            .map(|h| h.pid)
+            .filter(|p| *p != 0)
+    }
+
     /// The port the node allocated this job, if any.
     ///
     /// Visible rather than implicit: a port present only in the child's
@@ -957,6 +1039,7 @@ impl JobRegistry {
             deadline: None,
             started: Instant::now(),
             killed: false,
+            kill_asked: None,
             pending: None,
             verdict: Verdict::Ungoverned,
             resolved_cwd: PathBuf::from("/"),
@@ -1128,6 +1211,10 @@ impl JobRegistry {
     pub fn supervise(&self) -> Vec<JobId> {
         // A policy cannot act on a state nobody has observed.
         self.settle_all();
+        // A job that ignored the polite signal is forced. This rides the same
+        // tick for the same reason sampling does: the daemon owns the interval,
+        // so escalation needs no timer, no thread, and no sleeping test.
+        self.escalate_overdue_kills();
         // Sampling rides the tick that already exists rather than owning a
         // timer of its own. The interval between calls *is* the sampling
         // interval, which is why a rate is computed from observed elapsed time
@@ -1215,6 +1302,39 @@ impl JobRegistry {
         for id in ids {
             // Reading from the end: this is for the status, not the bytes.
             let _ = self.tail(&id, u64::MAX);
+        }
+    }
+
+    /// Force any job that ignored its stop past the grace period.
+    ///
+    /// The polite signal is a request, and a request can be declined — by a job
+    /// that traps it, or one already too wedged to act on it. Without this step
+    /// "stop" would be advisory, which is not what anyone means by it.
+    ///
+    /// implements: a-job-is-a-process-group
+    fn escalate_overdue_kills(&self) {
+        let grace = self.kill_grace;
+        let overdue: Vec<(u32, u64)> = {
+            let mut inner = self.locked();
+            inner
+                .jobs
+                .values_mut()
+                .filter(|h| !h.status.is_terminal())
+                .filter_map(|h| {
+                    let asked = h.kill_asked?;
+                    (asked.elapsed() >= grace).then(|| {
+                        // Cleared so a job that survives even `SIGKILL` — an
+                        // uninterruptible wait — is not re-signalled on every
+                        // tick forever.
+                        h.kill_asked = None;
+                        (h.pid, h.pid_start)
+                    })
+                })
+                .collect()
+        };
+
+        for (pid, pid_start) in overdue {
+            signal_group(pid, pid_start, Signal::SIGKILL);
         }
     }
 
@@ -1594,6 +1714,7 @@ impl JobRegistry {
             deadline: request.deadline,
             started: Instant::now(),
             killed: false,
+            kill_asked: None,
             pending: None,
             // A pending job's default fate is the fail-closed one; a decision
             // overrides it.
@@ -1931,7 +2052,14 @@ impl JobRegistry {
                     match procfs::liveness(handle.pid, handle.pid_start) {
                         Liveness::Alive => {}
                         Liveness::Dead | Liveness::Unsupported => {
-                            handle.status = JobStatus::OutcomeUnknown;
+                            // We asked it to stop and it is gone: that is a
+                            // stop, not a mystery. `OutcomeUnknown` is for an
+                            // adopted process whose end we did not cause.
+                            handle.status = if handle.killed {
+                                JobStatus::Killed
+                            } else {
+                                JobStatus::OutcomeUnknown
+                            };
                             let _ = persist(store, id, handle);
                             claimed = self.claim(id, handle);
                         }
@@ -2096,7 +2224,14 @@ impl JobRegistry {
                     match procfs::liveness(handle.pid, handle.pid_start) {
                         Liveness::Alive => {}
                         Liveness::Dead | Liveness::Unsupported => {
-                            handle.status = JobStatus::OutcomeUnknown;
+                            // We asked it to stop and it is gone: that is a
+                            // stop, not a mystery. `OutcomeUnknown` is for an
+                            // adopted process whose end we did not cause.
+                            handle.status = if handle.killed {
+                                JobStatus::Killed
+                            } else {
+                                JobStatus::OutcomeUnknown
+                            };
                             let _ = persist(store, id, handle);
                             settled = Some((outcome_of(handle), self.claim(id, handle)));
                         }
@@ -2201,11 +2336,23 @@ impl JobRegistry {
             } else {
                 // Record operator intent regardless of the signal's result:
                 // `killed` is why `wait` reports `Killed` rather than an exit
-                // code. A terminal job has `child == None`, so killing it is a
-                // no-op.
-                if let Some(child) = handle.child.as_mut() {
+                // code.
+                //
+                // **Signal the group, not the child handle.** Going through
+                // `Child::kill` reached only the process we spawned — so a job
+                // that was a shell wrapping the real program left that program
+                // running, and an **adopted** job (which has no child handle at
+                // all) was not signalled whatsoever while still returning `Ok`.
+                // A caller that asked to stop something and got a quiet success
+                // would believe it had, which is the exact failure the refusal
+                // above exists to prevent.
+                //
+                // A job that has already finished is not signalled: its pid may
+                // belong to something else by now.
+                if !handle.status.is_terminal() {
                     handle.killed = true;
-                    let _ = child.kill();
+                    handle.kill_asked = Some(Instant::now());
+                    signal_group(handle.pid, handle.pid_start, Signal::SIGTERM);
                     let _ = persist(store, id, handle);
                 }
                 None
