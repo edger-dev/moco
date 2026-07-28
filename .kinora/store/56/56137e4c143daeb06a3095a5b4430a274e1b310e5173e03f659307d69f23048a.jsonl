@@ -1,0 +1,3 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"assign","kind":"kin::assign","id":"57478290f399e35919dc6a4abdaa1a51b70afe4207e17656409c44882606bf00","hash":"57478290f399e35919dc6a4abdaa1a51b70afe4207e17656409c44882606bf00","parents":[],"ts":"2026-07-28T13:40:15.591731598Z","author":"YJ Park","provenance":"authored","metadata":{"kin::target_root":"specs"}}
+{"event_kind":"store","kind":"markdown","id":"57478290f399e35919dc6a4abdaa1a51b70afe4207e17656409c44882606bf00","hash":"57478290f399e35919dc6a4abdaa1a51b70afe4207e17656409c44882606bf00","parents":[],"ts":"2026-07-28T13:40:15.591731598Z","author":"YJ Park","provenance":"authored","metadata":{"doc::kind":"spec","name":"boot-autostart-reads-the-node-manifest"}}
