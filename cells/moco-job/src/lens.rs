@@ -73,3 +73,33 @@ pub enum HumanView {
     /// discovered.
     Terminal,
 }
+
+/// How a screen was arrived at.
+///
+/// implements: the-screen-is-a-live-fold-not-a-replay
+#[derive(Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScreenSource {
+    /// Folded incrementally as the job drew, by the same pump that writes its
+    /// capture. Exact: it reflects everything the job has ever emitted.
+    Live,
+    /// Reconstructed by replaying the **retained** capture. Correct for
+    /// anything drawn within what is still kept, and blind to state drawn
+    /// before compaction discarded it — a job that painted a banner once and
+    /// went quiet may be missing it.
+    Replayed,
+}
+
+/// One read through the screen lens.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct ScreenRead {
+    pub source: ScreenSource,
+    /// The grid this was rendered at, which is also the size the job was told
+    /// it had. Reported so a caller can tell a wrapped line from a job that
+    /// really emitted two.
+    pub rows: u16,
+    pub cols: u16,
+    /// The visible screen as plain text, one line per row, trailing blank rows
+    /// removed. **Not** scrollback — `tail` is for history.
+    pub text: String,
+}

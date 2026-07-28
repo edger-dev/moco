@@ -108,6 +108,21 @@ pub struct MachineReply {
     pub next_offset: u64,
 }
 
+/// Read a job's current screen.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct ScreenRequest {
+    pub id: String,
+}
+
+/// The visible grid, and whether it was observed or reconstructed.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct ScreenReply {
+    pub source: crate::lens::ScreenSource,
+    pub rows: u16,
+    pub cols: u16,
+    pub text: String,
+}
+
 /// Read a job's recent resource history.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct StatsRequest {
@@ -332,6 +347,19 @@ pub fn dispatch(
                 },
             )
         }
+        "screen" => {
+            let req: ScreenRequest = read(method, request)?;
+            let out = registry.screen(&JobId(req.id))?;
+            write(
+                method,
+                &ScreenReply {
+                    source: out.source,
+                    rows: out.rows,
+                    cols: out.cols,
+                    text: out.text,
+                },
+            )
+        }
         "stats" => {
             let req: StatsRequest = read(method, request)?;
             let out = registry.stats(&JobId(req.id))?;
@@ -434,6 +462,7 @@ pub const METHODS: &[&str] = &[
     "clear",
     "tail",
     "machine",
+    "screen",
     "stats",
     "wait",
     "kill",

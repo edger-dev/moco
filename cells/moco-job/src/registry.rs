@@ -10,7 +10,7 @@ use crate::admission;
 use crate::audit::{AuditRecord, AuditSink, MemoryAuditLog, Verdict};
 use crate::error::JobError;
 use crate::job::{DeniedReason, JobId, JobRequest, JobStatus, Outcome, Tail};
-use crate::lens::{HumanView, LensSource, MachineRead};
+use crate::lens::{HumanView, LensSource, MachineRead, ScreenRead, ScreenSource};
 use crate::lifecycle::{Lifetime, RestartPolicy};
 use crate::manifest::Manifest;
 use crate::port::{self, PortRange};
@@ -110,6 +110,33 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
 /// pays. Anything wanting history should scrape this and store it elsewhere.
 pub const SAMPLE_HISTORY: usize = 60;
 
+/// The grid a terminal-lens job is given, and the grid its screen renders at.
+///
+/// **These are one number, not two that happen to match.** A job asks the
+/// kernel how wide its terminal is and wraps its own output accordingly; if the
+/// parser's grid disagreed, every long line would break in a place the job
+/// never broke it, and the screen would be a plausible-looking fiction.
+///
+/// Wider and taller than the traditional 80x24 because of what actually runs
+/// here — compiler diagnostics and test output, which 80 columns folds into an
+/// unreadable zigzag. A declaration-level override is the escape hatch when a
+/// job needs a specific size.
+pub const SCREEN_COLS: u16 = 120;
+pub const SCREEN_ROWS: u16 = 40;
+
+/// Drop trailing blank rows from a rendered screen.
+///
+/// A 40-row grid holding four lines of output is thirty-six empty lines of
+/// padding, which costs an agent tokens to receive and tells it nothing.
+/// Interior blank lines are kept — those are layout the job chose.
+fn trim_blank_rows(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
 /// How often `wait` polls a running child for exit / deadline / decision.
 const POLL: Duration = Duration::from_millis(10);
 
@@ -132,6 +159,11 @@ const KEEP_DENOMINATOR: u64 = 4;
 struct JobHandle {
     /// Advisory ceilings declared for this job.
     limits: Limits,
+    /// The live screen fold for a terminal-lens job, fed by the same pump that
+    /// writes the capture. `None` for a logs job, and for a **re-adopted**
+    /// terminal job — its pty died with the previous daemon, so there is
+    /// nothing left to fold and its screen has to be replayed instead.
+    screen: Option<Arc<Mutex<vt100::Parser>>>,
     /// Recent resource readings, oldest first, bounded at [`SAMPLE_HISTORY`].
     samples: VecDeque<Sample>,
     /// The previous raw CPU total, so the next sample can be turned into a
@@ -346,6 +378,7 @@ fn spawn_child(
     port: Option<u16>,
     port_env: &str,
     human_view: HumanView,
+    screen: &mut Option<Arc<Mutex<vt100::Parser>>>,
 ) -> Result<Child, JobError> {
     let (program, args) = argv.split_first().ok_or(JobError::EmptyArgv)?;
 
@@ -359,17 +392,38 @@ fn spawn_child(
     // child a `std::process::Child`, so every reap, kill and settle path is the
     // same one the log lens uses. Two kinds of child in the registry would be
     // two of everything that touches one.
-    let (stdout, stderr) = match human_view {
+    let (stdin, stdout, stderr) = match human_view {
         HumanView::Logs => (
+            Stdio::null(),
             Stdio::from(capture.try_clone().map_err(JobError::Io)?),
             Stdio::from(capture.try_clone().map_err(JobError::Io)?),
         ),
         HumanView::Terminal => {
-            let pty = nix::pty::openpty(None, None)
+            // **Tell the job how big its terminal is.** With no winsize the
+            // kernel hands out zeros, and a job that asks gets 0x0 — so it
+            // either refuses to draw or invents a size of its own, and either
+            // way the screen we render would not be the screen it drew.
+            let size = nix::pty::Winsize {
+                ws_row: SCREEN_ROWS,
+                ws_col: SCREEN_COLS,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let pty = nix::pty::openpty(&size, None)
                 .map_err(|e| JobError::Audit(format!("could not allocate a pty: {e}")))?;
             let slave_err = pty.slave.try_clone().map_err(JobError::Io)?;
             let master = pty.master;
             let mut sink = capture.try_clone().map_err(JobError::Io)?;
+
+            // **The screen is folded here, as the bytes go past.** The
+            // alternative — replaying the capture on demand — would be wrong in
+            // a way that is hard to see: the capture is bounded, so a job that
+            // painted a banner once and went quiet would lose it the moment
+            // compaction reached those bytes, and the screen would silently
+            // disagree with the terminal. Folding live means the state outlives
+            // the bytes it came from, and a read costs nothing.
+            let parser = Arc::new(Mutex::new(vt100::Parser::new(SCREEN_ROWS, SCREEN_COLS, 0)));
+            *screen = Some(parser.clone());
 
             // One pump per terminal job. It ends when the last slave fd closes,
             // which happens when the child and our copies are gone — so this
@@ -382,15 +436,37 @@ fn spawn_child(
                     match master.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            // The capture is written first: it is what
+                            // durability, `tail` and re-adoption all rest on,
+                            // and the screen is a convenience layered over it.
                             if sink.write_all(&buf[..n]).is_err() {
                                 break;
+                            }
+                            if let Ok(mut parser) = parser.lock() {
+                                parser.process(&buf[..n]);
                             }
                         }
                     }
                 }
             });
 
-            (Stdio::from(pty.slave), Stdio::from(slave_err))
+            // **All three descriptors, not just the two that draw.** A program
+            // asking whether it is on a terminal overwhelmingly asks about
+            // stdin — `stty size` and most TUI setup do — so leaving stdin on
+            // /dev/null would have the job querying a device that is not the
+            // one it is drawing to, and getting a refusal.
+            //
+            // The consequence, stated rather than discovered: a job that reads
+            // stdin now **blocks** instead of seeing EOF, exactly as it would
+            // at a terminal nobody is typing at. There is no attach path yet to
+            // type into it, so an interactive job waits forever — which is the
+            // truthful behaviour for a terminal with no one at it.
+            let slave_in = pty.slave.try_clone().map_err(JobError::Io)?;
+            (
+                Stdio::from(slave_in),
+                Stdio::from(pty.slave),
+                Stdio::from(slave_err),
+            )
         }
     };
 
@@ -404,7 +480,7 @@ fn spawn_child(
     command
         .args(args)
         .current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr)
         .spawn()
@@ -527,6 +603,7 @@ impl JobRegistry {
                 id,
                 JobHandle {
                     limits: record.limits,
+                    screen: None,
                     samples: VecDeque::new(),
                     last_cpu: None,
                     child: None,
@@ -780,6 +857,7 @@ impl JobRegistry {
 
         let handle = JobHandle {
             limits: Limits::default(),
+            screen: None,
             samples: VecDeque::new(),
             last_cpu: None,
             child: None,
@@ -1136,6 +1214,58 @@ impl JobRegistry {
         })
     }
 
+    /// What a person would see if they attached to this job right now.
+    ///
+    /// The third lens, and the one that makes a redrawing program legible: a
+    /// progress bar that rewrites one line with carriage returns is thousands
+    /// of superseded frames in `tail` and a single line here. Cheap for the
+    /// same reason the machine lens is cheap — it is an *answer*, not a stream.
+    ///
+    /// **Not scrollback.** Only the visible grid comes back; history is what
+    /// `tail` is for, and duplicating it here would undo the saving.
+    ///
+    /// implements: the-screen-is-a-live-fold-not-a-replay
+    pub fn screen(&self, id: &JobId) -> Result<ScreenRead, JobError> {
+        let (live, capture) = {
+            let inner = self.locked();
+            let handle = inner
+                .jobs
+                .get(id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
+            (handle.screen.clone(), handle.capture.clone())
+        };
+
+        // The live fold, where there is one. Read under its own lock rather
+        // than the registry's: the pump holds it for the length of a `process`
+        // call, and making a screen read wait on the registry lock would put a
+        // job's output rate in the path of every other operation.
+        if let Some(parser) = live {
+            let parser = parser
+                .lock()
+                .map_err(|_| JobError::Audit("the screen parser is poisoned".to_string()))?;
+            return Ok(ScreenRead {
+                source: ScreenSource::Live,
+                rows: SCREEN_ROWS,
+                cols: SCREEN_COLS,
+                text: trim_blank_rows(&parser.screen().contents()),
+            });
+        }
+
+        // No live fold: a logs job, or a terminal job whose pty died with the
+        // daemon that owned it. Replaying the **retained** capture is the best
+        // available answer, and it is labelled `Replayed` so a caller knows it
+        // is reconstructed rather than observed.
+        let bytes = std::fs::read(&capture).map_err(JobError::Io)?;
+        let mut parser = vt100::Parser::new(SCREEN_ROWS, SCREEN_COLS, 0);
+        parser.process(&bytes);
+        Ok(ScreenRead {
+            source: ScreenSource::Replayed,
+            rows: SCREEN_ROWS,
+            cols: SCREEN_COLS,
+            text: trim_blank_rows(&parser.screen().contents()),
+        })
+    }
+
     /// Every job this registry knows about, in creation order.
     ///
     /// Settles first, so a finished job is reported finished. Reads are
@@ -1364,6 +1494,7 @@ impl JobRegistry {
 
         let mut handle = JobHandle {
             limits: request.limits,
+            screen: None,
             samples: VecDeque::new(),
             last_cpu: None,
             child: None,
@@ -1409,6 +1540,11 @@ impl JobRegistry {
                 // the argv as declared, token and all, and only now does the
                 // node-supplied value go in.
                 let spawn_argv = port::substitute(&request.argv, handle.port_request());
+                // Filled in by the spawn for a terminal job, and left `None`
+                // otherwise; moved onto the handle only once the spawn has
+                // actually succeeded, so a failed start leaves no parser behind
+                // for a process that never drew anything.
+                let mut screen = None;
                 match spawn_child(
                     &spawn_argv,
                     &request.cwd,
@@ -1416,8 +1552,10 @@ impl JobRegistry {
                     handle.port_request(),
                     handle.port_env_or_default(),
                     handle.human_view,
+                    &mut screen,
                 ) {
                     Ok(child) => {
+                        handle.screen = screen;
                         handle.pid = child.id();
                         // Recorded at spawn: this is what makes a later probe
                         // able to tell this process from a reused pid.
@@ -1614,6 +1752,7 @@ impl JobRegistry {
                         }
                     };
                     let spawn_argv = port::substitute(&argv, handle.port_request());
+                    let mut screen = None;
                     match spawn_child(
                         &spawn_argv,
                         &cwd,
@@ -1621,8 +1760,10 @@ impl JobRegistry {
                         handle.port_request(),
                         handle.port_env_or_default(),
                         handle.human_view,
+                        &mut screen,
                     ) {
                         Ok(child) => {
+                            handle.screen = screen;
                             handle.pid = child.id();
                             handle.pid_start = procfs::start_time(handle.pid).unwrap_or(0);
                             handle.child = Some(child);
@@ -1728,6 +1869,16 @@ impl JobRegistry {
             // Read through the handle opened at job creation — never re-open by
             // path, which a swapped file could hijack.
             let mut file = handle.capture_read.try_clone().map_err(JobError::Io)?;
+
+            // **Clamp to the end rather than seeking past it.** Asking to
+            // resume beyond what exists is not an error — it is a caller that
+            // is already up to date, and the honest answer is "nothing new".
+            // Erroring instead is worse than useless here: `settle_all` reads
+            // with `u64::MAX` precisely to mean *I want the status, not the
+            // bytes*, and an offset that large is rejected outright by the
+            // kernel, so the failure was being swallowed on every settle.
+            let end = file.seek(SeekFrom::End(0)).map_err(JobError::Io)?;
+            let physical = physical.min(end);
             file.seek(SeekFrom::Start(physical)).map_err(JobError::Io)?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).map_err(JobError::Io)?;
