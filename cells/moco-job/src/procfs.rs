@@ -91,6 +91,23 @@ pub fn usage(_pid: u32) -> Option<Usage> {
     None
 }
 
+/// The working directory of `pid`, if it can be read.
+///
+/// `/proc/<pid>/cwd` is a symlink the kernel maintains, so this is the process's
+/// *current* directory rather than the one it was started in — which is the
+/// honest answer to "where does this run", and the only one available for a
+/// process we did not start. Unreadable when the process belongs to another
+/// user, which is a real answer too: not knowing beats inventing.
+#[cfg(target_os = "linux")]
+pub fn cwd(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn cwd(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Clock ticks per second, for turning a tick delta into a percentage.
 ///
 /// 100 on Linux effectively everywhere; same reasoning as `PAGE_SIZE`.

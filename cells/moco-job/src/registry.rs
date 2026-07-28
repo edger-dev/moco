@@ -952,6 +952,11 @@ impl JobRegistry {
         Ok(started)
     }
 
+    /// The directory this job runs in.
+    pub fn cwd_of(&self, id: &JobId) -> Option<PathBuf> {
+        self.locked().jobs.get(id).map(|h| h.resolved_cwd.clone())
+    }
+
     /// The pid of the process this job runs as, if it has one.
     ///
     /// It is also the job's **process group id**, since every job leads its own
@@ -1042,7 +1047,13 @@ impl JobRegistry {
             kill_asked: None,
             pending: None,
             verdict: Verdict::Ungoverned,
-            resolved_cwd: PathBuf::from("/"),
+            // **Where it actually runs**, read from `/proc`. This used to be a
+            // hard-coded `/` standing in for "we did not look" — which is
+            // indistinguishable from a job genuinely running at the root, so
+            // the one field that says where a mystery process lives read as a
+            // plausible lie. `/` remains only as the last resort for a process
+            // whose cwd we are not permitted to read.
+            resolved_cwd: procfs::cwd(pid).unwrap_or_else(|| PathBuf::from("/")),
             argv: command.unwrap_or_default(),
             audited: false,
             scope,
@@ -1245,14 +1256,27 @@ impl JobRegistry {
             // asks as that workspace — not with global authority it has no
             // reason to hold.
             if let Ok(new_id) = self.start_named(&name, &Caller::Scoped(scope)) {
-                if let Some(handle) = self.locked().jobs.get_mut(&new_id) {
+                let mut inner = self.locked();
+                let Inner { jobs, store } = &mut *inner;
+
+                // **Persisted, not just held in memory.** The count used to
+                // live only in the handle, so it survived exactly as long as
+                // the daemon did — and a counter that resets on restart can
+                // never notice a crash loop, which is the only reason to keep
+                // one.
+                if let Some(handle) = jobs.get_mut(&new_id) {
                     handle.restarts = previous + 1;
+                    let _ = persist(store, &new_id, handle);
                 }
                 // The old entry has been superseded; stop counting it as due.
-                if let Some(old) = self.locked().jobs.get_mut(&id) {
-                    old.restarts = previous + 1;
+                // Its own count stays as it was — this attempt did not restart
+                // `previous + 1` times, and overwriting it would make the
+                // history of a crash loop read as a row of identical numbers.
+                if let Some(old) = jobs.get_mut(&id) {
                     old.killed = true;
+                    let _ = persist(store, &id, old);
                 }
+                drop(inner);
                 restarted.push(new_id);
             }
         }
@@ -1281,6 +1305,28 @@ impl JobRegistry {
             .filter(|(_, h)| h.status.is_terminal() && caller.may_write(&h.scope))
             .map(|(id, _)| id.clone())
             .collect();
+
+        // **Keep each declaration's port before its records go.** Stickiness
+        // is derived from the records, so removing them silently reassigns
+        // ports on the next start — every bookmark and config someone wrote
+        // down invalidated by an action that sounds like housekeeping. The port
+        // memory is written back as a bare record, which is the same fact the
+        // job's own record was carrying.
+        // A plain Vec: the doomed set is small, and `Scope` is deliberately not
+        // ordered — it is an identity, not a rank.
+        let mut remembered: Vec<(Scope, String)> = Vec::new();
+        for id in &doomed {
+            let Some(handle) = jobs.get(id) else { continue };
+            let (Some(name), port) = (handle.name.clone(), handle.port) else {
+                continue;
+            };
+            let key = (handle.scope.clone(), name.clone());
+            if port == 0 || remembered.contains(&key) {
+                continue;
+            }
+            remembered.push(key);
+            let _ = port::remember(store, &handle.scope, &name, port);
+        }
 
         for id in &doomed {
             jobs.remove(id);
