@@ -39,8 +39,12 @@ fn node(name: &str) -> JobRegistry {
     JobRegistry::ungoverned().expect("registry").with_node(name)
 }
 
-/// Only `session` entries are started — `manual` waits to be asked, and `boot`
-/// is the daemon's business, not a session's.
+/// Only `session` entries are started — `manual` waits to be asked.
+///
+/// `boot` is not in this list because a workspace may no longer declare it at
+/// all; see `boot_in_a_workspace_manifest_is_refused_and_says_where_it_belongs`.
+/// This test previously asserted that `ensure` skipped such an entry silently,
+/// which was the right answer only while `boot` had nowhere correct to live.
 #[test]
 fn ensure_starts_only_session_entries() {
     let ws = workspace(
@@ -48,7 +52,6 @@ fn ensure_starts_only_session_entries() {
         r#"proc (
   {name a, argv (sleep 30), autostart @Session}
   {name b, argv (sleep 30), autostart @Manual}
-  {name c, argv (sleep 30), autostart @Boot}
 )"#,
         false,
     );
@@ -67,10 +70,6 @@ fn ensure_starts_only_session_entries() {
     assert!(
         reg.declared(&scope, "b").is_none(),
         "manual waits to be asked"
-    );
-    assert!(
-        reg.declared(&scope, "c").is_none(),
-        "boot is the daemon's job"
     );
 
     let _ = reg.clear(&Caller::Console);

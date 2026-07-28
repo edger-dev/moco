@@ -32,6 +32,16 @@ pub enum JobError {
     Refused { name: String, refusal: String },
     /// A restart was asked for on a job with no declaration to re-read.
     NotDeclared { job: JobId },
+    /// A **workspace** manifest declared a `boot` job, which nothing would ever
+    /// start.
+    ///
+    /// implements: boot-autostart-reads-the-node-manifest
+    BootInWorkspace { name: String, manifest: String },
+    /// A **node** manifest entry left `cwd` unstated. There is no workspace root
+    /// to fall back on.
+    ///
+    /// implements: boot-autostart-reads-the-node-manifest
+    NodeJobNeedsCwd { name: String, manifest: String },
     /// A name was used without a workspace to resolve it against.
     NameNeedsWorkspace { name: String },
     /// A caller tried to write to a job owned by another workspace.
@@ -79,6 +89,20 @@ impl fmt::Display for JobError {
                 "the manifest at {path} could not be read: {detail}. \
                  This is a problem with the file, not with any one entry — \
                  nothing in it is being applied until it parses."
+            ),
+            JobError::BootInWorkspace { name, manifest } => write!(
+                f,
+                "`{name}` in {manifest} declares autostart=boot, but boot jobs are \
+                 started by the node daemon from the **node** manifest — nothing \
+                 discovers a workspace at boot, so this would never start. Use \
+                 autostart=session for a job an agent should bring up with its \
+                 workspace, or move the entry into the node manifest."
+            ),
+            JobError::NodeJobNeedsCwd { name, manifest } => write!(
+                f,
+                "`{name}` in {manifest} does not say where it runs. A node-level job \
+                 has no workspace root to fall back on, so it must declare an \
+                 absolute `cwd`."
             ),
             JobError::Undeclared {
                 name,

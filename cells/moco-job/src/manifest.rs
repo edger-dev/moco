@@ -161,7 +161,58 @@ impl Manifest {
         })?;
         manifest.check_unique_names(&path)?;
         manifest.check_tokens(&path)?;
+        manifest.check_no_boot(&path)?;
         Ok(manifest)
+    }
+
+    /// Read the **node's** manifest — what this machine runs, independent of any
+    /// workspace.
+    ///
+    /// The same shape and the same checks, minus the `boot` refusal: this is the
+    /// one manifest where `boot` means something, because it is the one the
+    /// daemon can find without being told a workspace first.
+    ///
+    /// implements: boot-autostart-reads-the-node-manifest
+    pub fn load_node(dir: impl AsRef<Path>) -> Result<Self, JobError> {
+        let path = Self::path_in(&dir);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(JobError::Manifest {
+                    path: path.display().to_string(),
+                    detail: e.to_string(),
+                });
+            }
+        };
+        let manifest: Manifest = facet_styx::from_str(&text).map_err(|e| JobError::Manifest {
+            path: path.display().to_string(),
+            detail: e.to_string(),
+        })?;
+        manifest.check_unique_names(&path)?;
+        manifest.check_tokens(&path)?;
+        Ok(manifest)
+    }
+
+    /// A workspace cannot declare a boot job.
+    ///
+    /// Refused rather than ignored: nothing discovers an arbitrary workspace at
+    /// daemon startup, so the entry would never run. A declaration that reads as
+    /// active and is inert is the worst of the three outcomes — worse than an
+    /// error, and worse than not being allowed to write it — because it costs a
+    /// debugging session to notice.
+    ///
+    /// implements: boot-autostart-reads-the-node-manifest
+    fn check_no_boot(&self, path: &Path) -> Result<(), JobError> {
+        for entry in &self.proc {
+            if entry.autostart == crate::lifecycle::Autostart::Boot {
+                return Err(JobError::BootInWorkspace {
+                    name: entry.name.clone(),
+                    manifest: path.display().to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Two entries with one name is a config error, not last-one-wins: silently

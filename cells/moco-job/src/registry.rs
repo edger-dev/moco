@@ -124,6 +124,38 @@ pub const SAMPLE_HISTORY: usize = 60;
 pub const SCREEN_COLS: u16 = 120;
 pub const SCREEN_ROWS: u16 = 40;
 
+/// Build a job request from a manifest entry.
+///
+/// Shared by workspace `start_named` and node `boot`: the two differ only in
+/// which manifest was read and which scope owns the result, and a second copy
+/// of this would be a place for the two to quietly diverge.
+fn request_from(
+    entry: &crate::manifest::ProcEntry,
+    cwd: PathBuf,
+    scope: &Scope,
+    allocated: Option<u16>,
+) -> JobRequest {
+    let mut request = JobRequest::new(entry.argv.clone(), cwd)
+        .in_scope(scope.clone())
+        .named(&entry.name)
+        .with_lifecycle(entry.lifetime, entry.restart);
+    if let Some(port) = allocated {
+        request = request.with_port(port, Manifest::port_env_of(entry));
+    }
+    request = request.with_human_view(entry.human_view);
+    request = request.with_limits(Limits {
+        cpu_pct: entry.cpu_pct,
+        mem_mb: entry.mem_mb,
+    });
+    if !entry.machine_file.is_empty() {
+        request = request.with_machine_view(&entry.machine_file, &entry.machine_format);
+    }
+    if entry.deadline_ms > 0 {
+        request = request.with_deadline(Duration::from_millis(entry.deadline_ms));
+    }
+    request
+}
+
 /// Drop trailing blank rows from a rendered screen.
 ///
 /// A 40-row grid holding four lines of output is thirty-six empty lines of
@@ -772,25 +804,82 @@ impl JobRegistry {
             )?
         };
 
-        let mut request = JobRequest::new(entry.argv.clone(), cwd)
-            .in_scope(scope.clone())
-            .named(&entry.name)
-            .with_lifecycle(entry.lifetime, entry.restart);
-        if let Some(port) = allocated {
-            request = request.with_port(port, Manifest::port_env_of(entry));
+        self.start(request_from(entry, cwd, scope, allocated))
+    }
+
+    /// Start everything the **node** declares for boot.
+    ///
+    /// Called once by the daemon at startup, after re-adoption — which is why
+    /// this is `ensure` semantics and not `start`: a job the previous daemon
+    /// left running has already been taken back over, and starting a second
+    /// copy alongside it is the one thing a supervisor must never do.
+    ///
+    /// These jobs are owned by [`Scope::System`] and started as the console,
+    /// because the daemon *is* the node. A workspace session consequently
+    /// cannot stop them — the ordinary scoping rule, with nothing added.
+    ///
+    /// implements: boot-autostart-reads-the-node-manifest
+    pub fn boot(&self) -> Result<Vec<JobId>, JobError> {
+        let dir = self.dir();
+        let manifest = Manifest::load_node(&dir)?;
+        let path = Manifest::path_in(&dir).display().to_string();
+
+        let mut started = Vec::new();
+        for entry in &manifest.proc {
+            if entry.autostart != crate::lifecycle::Autostart::Boot {
+                continue;
+            }
+
+            // No workspace root to fall back on, so an unstated cwd is a
+            // refusal rather than a guess. Checked before anything is started,
+            // so a broken entry cannot leave half a boot behind it.
+            if entry.cwd.is_empty() {
+                return Err(JobError::NodeJobNeedsCwd {
+                    name: entry.name.clone(),
+                    manifest: path.clone(),
+                });
+            }
+
+            // The host gate still applies: one manifest is shared across
+            // machines, and that is exactly how a machine-specific job stays on
+            // its machine. The **worktree** gate is skipped — it asks which
+            // checkout of a repo this is, and a node-level job is in no repo.
+            if !entry.hosts.is_empty() && !entry.hosts.iter().any(|h| h == &self.node) {
+                continue;
+            }
+
+            if self
+                .declared(&Scope::System, &entry.name)
+                .and_then(|(id, _)| self.status_of(&id))
+                .is_some_and(|status| !status.is_terminal())
+            {
+                continue;
+            }
+
+            let allocated = {
+                let inner = self.locked();
+                port::allocate(
+                    &inner.store,
+                    PortRange::from_env(),
+                    &Scope::System,
+                    Some(&entry.name),
+                    entry.port,
+                )?
+            };
+
+            match self.start(request_from(
+                entry,
+                PathBuf::from(&entry.cwd),
+                &Scope::System,
+                allocated,
+            )) {
+                Ok(id) => started.push(id),
+                // One entry failing to spawn must not abandon the rest of the
+                // node's boot — an unrelated service should still come up.
+                Err(_) => continue,
+            }
         }
-        request = request.with_human_view(entry.human_view);
-        request = request.with_limits(Limits {
-            cpu_pct: entry.cpu_pct,
-            mem_mb: entry.mem_mb,
-        });
-        if !entry.machine_file.is_empty() {
-            request = request.with_machine_view(&entry.machine_file, &entry.machine_format);
-        }
-        if entry.deadline_ms > 0 {
-            request = request.with_deadline(Duration::from_millis(entry.deadline_ms));
-        }
-        self.start(request)
+        Ok(started)
     }
 
     /// The port the node allocated this job, if any.
