@@ -134,6 +134,57 @@ pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(5);
 pub const SCREEN_COLS: u16 = 120;
 pub const SCREEN_ROWS: u16 = 40;
 
+/// The pid a holder published for the job it is running, if any.
+fn holder_child(capture: &Path) -> Option<u32> {
+    std::fs::read_to_string(crate::holder::HolderPaths::beside(capture).job_pid)
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+}
+
+/// Spawn a terminal job under its own PTY holder.
+///
+/// implements: pty-holder-owns-the-terminal
+fn spawn_holder(
+    holder: &Path,
+    argv: &[String],
+    cwd: &Path,
+    capture_path: &Path,
+    port: Option<u16>,
+    port_env: &str,
+) -> Result<Child, JobError> {
+    let mut command = Command::new(holder);
+    command
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--capture")
+        .arg(capture_path)
+        .arg("--rows")
+        .arg(SCREEN_ROWS.to_string())
+        .arg("--cols")
+        .arg(SCREEN_COLS.to_string());
+    if let Some(port) = port {
+        command.arg("--env").arg(format!("{port_env}={port}"));
+    }
+    command.arg("--").args(argv);
+
+    // The holder's stdio goes nowhere: the job's output travels through the pty
+    // into the capture, and anything the holder itself has to say is a failure
+    // it reports by exiting non-zero.
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    command
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|source| JobError::Spawn {
+            program: holder.display().to_string(),
+            searched_path: effective_path(),
+            source,
+        })
+}
+
 /// Signal a job's whole process group.
 ///
 /// **Guarded by liveness, and that guard is the point.** Signalling a stale pid
@@ -200,7 +251,7 @@ fn request_from(
 /// A 40-row grid holding four lines of output is thirty-six empty lines of
 /// padding, which costs an agent tokens to receive and tells it nothing.
 /// Interior blank lines are kept — those are layout the job chose.
-fn trim_blank_rows(text: &str) -> String {
+pub(crate) fn trim_blank_rows(text: &str) -> String {
     let mut lines: Vec<&str> = text.lines().collect();
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -453,11 +504,25 @@ fn spawn_child(
     argv: &[String],
     cwd: &Path,
     capture: &File,
+    capture_path: &Path,
     port: Option<u16>,
     port_env: &str,
     human_view: HumanView,
     screen: &mut Option<Arc<Mutex<vt100::Parser>>>,
+    pty_holder: Option<&Path>,
 ) -> Result<Child, JobError> {
+    // **A terminal job under a holder is spawned as the holder.** The job then
+    // belongs to a process that is not this daemon, which is the entire point:
+    // restarting the supervisor no longer closes the pty out from under it.
+    //
+    // Everything downstream is unchanged — the holder writes the same capture
+    // file, leads a process group, and exits with the job's own code — so
+    // `tail`, compaction, liveness, restart policy and stop all keep working
+    // without knowing a holder is involved.
+    if let (HumanView::Terminal, Some(holder)) = (human_view, pty_holder) {
+        return spawn_holder(holder, argv, cwd, capture_path, port, port_env);
+    }
+
     let (program, args) = argv.split_first().ok_or(JobError::EmptyArgv)?;
 
     // Under a terminal lens the child's stdio is a **pty slave**, so `isatty` is
@@ -609,6 +674,12 @@ pub struct JobRegistry {
     /// How long a stopped job is given to exit on its own before the signal is
     /// escalated.
     kill_grace: Duration,
+    /// Path to the per-job PTY holder binary.
+    ///
+    /// `None` keeps the previous behaviour — the daemon owns the pty and it
+    /// dies with the daemon. Durability is **opt-in** so a deployment that has
+    /// not installed the holder is not broken by its absence.
+    pty_holder: Option<PathBuf>,
     /// What this node is called, for the host gate.
     ///
     /// **Injected, never read from the OS.** Matching `hostname` would make the
@@ -634,6 +705,7 @@ impl JobRegistry {
             audit: Arc::new(MemoryAuditLog::new()),
             capture_cap: DEFAULT_CAPTURE_CAP,
             kill_grace: DEFAULT_KILL_GRACE,
+            pty_holder: None,
             node: String::new(),
         })
     }
@@ -651,6 +723,7 @@ impl JobRegistry {
             audit: Arc::new(MemoryAuditLog::new()),
             capture_cap: DEFAULT_CAPTURE_CAP,
             kill_grace: DEFAULT_KILL_GRACE,
+            pty_holder: None,
             node: String::new(),
         })
     }
@@ -754,6 +827,13 @@ impl JobRegistry {
     /// Bound how large a job's scrollback may grow.
     pub fn with_capture_cap(mut self, bytes: u64) -> Self {
         self.capture_cap = bytes;
+        self
+    }
+
+    /// Run terminal-lens jobs under the holder at this path, so their pty
+    /// outlives this daemon.
+    pub fn with_pty_holder(mut self, path: impl Into<PathBuf>) -> Self {
+        self.pty_holder = Some(path.into());
         self
     }
 
@@ -955,6 +1035,21 @@ impl JobRegistry {
     /// The directory this job runs in.
     pub fn cwd_of(&self, id: &JobId) -> Option<PathBuf> {
         self.locked().jobs.get(id).map(|h| h.resolved_cwd.clone())
+    }
+
+    /// The **job's** own pid, as distinct from its holder's.
+    ///
+    /// Equal to [`Self::pid_of`] for an ordinary job. For a terminal job under
+    /// a holder it is the process the holder spawned — published by the holder
+    /// to a file, because the daemon did not spawn it and cannot otherwise know
+    /// it. `None` until the holder has published it.
+    pub fn job_pid_of(&self, id: &JobId) -> Option<u32> {
+        let capture = self.locked().jobs.get(id).map(|h| h.capture.clone())?;
+        let inner_pid =
+            std::fs::read_to_string(crate::holder::HolderPaths::beside(&capture).job_pid)
+                .ok()
+                .and_then(|t| t.trim().parse().ok());
+        inner_pid.or_else(|| self.pid_of(id))
     }
 
     /// The pid of the process this job runs as, if it has one.
@@ -1405,7 +1500,12 @@ impl JobRegistry {
             if !handle.status.is_running() || handle.pid == 0 {
                 continue;
             }
-            let Some(usage) = procfs::usage(handle.pid) else {
+            // **Sample the job, not its holder.** A holder is a read loop that
+            // consumes almost nothing, so sampling it would report every
+            // terminal job as idle whatever it was doing — the exact question
+            // resource sampling exists to answer, answered wrongly.
+            let sampled = holder_child(&handle.capture).unwrap_or(handle.pid);
+            let Some(usage) = procfs::usage(sampled) else {
                 // The process went away between the status check and the read.
                 // Nothing to report, and inventing a zero would be a lie about
                 // a job that is simply gone.
@@ -1489,6 +1589,19 @@ impl JobRegistry {
                 .ok_or_else(|| JobError::NotFound(id.clone()))?;
             (handle.screen.clone(), handle.capture.clone())
         };
+
+        // **The holder's screen file wins.** It is written by the process that
+        // actually owns the pty, so it is correct across a daemon restart — the
+        // in-process fold below cannot be, because it dies with us.
+        let from_holder = crate::holder::HolderPaths::beside(&capture).screen;
+        if let Ok(text) = std::fs::read_to_string(&from_holder) {
+            return Ok(ScreenRead {
+                source: ScreenSource::Live,
+                rows: SCREEN_ROWS,
+                cols: SCREEN_COLS,
+                text,
+            });
+        }
 
         // The live fold, where there is one. Read under its own lock rather
         // than the registry's: the pump holds it for the length of a `process`
@@ -1805,10 +1918,12 @@ impl JobRegistry {
                     &spawn_argv,
                     &request.cwd,
                     &handle.capture_write,
+                    &handle.capture.clone(),
                     handle.port_request(),
                     handle.port_env_or_default(),
                     handle.human_view,
                     &mut screen,
+                    self.pty_holder.as_deref(),
                 ) {
                     Ok(child) => {
                         handle.screen = screen;
@@ -2013,10 +2128,12 @@ impl JobRegistry {
                         &spawn_argv,
                         &cwd,
                         &handle.capture_write,
+                        &handle.capture.clone(),
                         handle.port_request(),
                         handle.port_env_or_default(),
                         handle.human_view,
                         &mut screen,
+                        self.pty_holder.as_deref(),
                     ) {
                         Ok(child) => {
                             handle.screen = screen;
