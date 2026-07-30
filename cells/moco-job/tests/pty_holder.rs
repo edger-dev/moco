@@ -54,6 +54,9 @@ fn daemon(state: &PathBuf) -> JobRegistry {
         .with_pty_holder(holder())
 }
 
+/// Jobs here deliberately outlive the daemon that started them, so a test that
+/// panics before its cleanup leaves one running for as long as it was told to
+/// sleep. Kept short for that reason.
 fn until(mut f: impl FnMut() -> bool) -> bool {
     for _ in 0..100 {
         if f() {
@@ -82,7 +85,7 @@ fn a_terminal_job_and_its_screen_outlive_the_daemon() {
     let ws = workspace(
         "outlive",
         r#"proc ({name tui,
-                argv (sh -c "printf '\033[2J\033[1;1HSTILL-HERE'; sleep 300"),
+                argv (sh -c "printf '\033[2J\033[1;1HSTILL-HERE'; sleep 20"),
                 human_view @Terminal})"#,
     );
     let state = dir("outlive-state");
@@ -137,7 +140,7 @@ fn a_terminal_job_and_its_screen_outlive_the_daemon() {
 fn stopping_the_job_takes_the_holder_with_it() {
     let ws = workspace(
         "stop",
-        r#"proc ({name tui, argv (sleep 300), human_view @Terminal})"#,
+        r#"proc ({name tui, argv (sleep 20), human_view @Terminal})"#,
     );
     let state = dir("stop-state");
     let reg = daemon(&state);
