@@ -115,12 +115,18 @@ pub struct ScreenRequest {
 }
 
 /// The visible grid, and whether it was observed or reconstructed.
+///
+/// The screen travels as **bytes**, like scrollback and the machine view. Not a
+/// stylistic choice: a `String` holding newlines is encoded as a heredoc and
+/// does not survive the round trip, so a multi-line screen — which is every
+/// screen — came back empty. Bytes are what every other payload on this wire
+/// already uses, and they are what is proven to work.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct ScreenReply {
     pub source: crate::lens::ScreenSource,
     pub rows: u16,
     pub cols: u16,
-    pub text: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Read a job's recent resource history.
@@ -356,7 +362,7 @@ pub fn dispatch(
                     source: out.source,
                     rows: out.rows,
                     cols: out.cols,
-                    text: out.text,
+                    bytes: out.text.into_bytes(),
                 },
             )
         }

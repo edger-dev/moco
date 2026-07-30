@@ -301,3 +301,73 @@ fn stats_round_trip_over_bytes() {
 
     let _ = reg.kill(&moco_job::JobId(started.id), &moco_job::Caller::Console);
 }
+
+/// **A multi-line payload survives the wire.**
+///
+/// A `String` containing newlines is encoded as a heredoc and comes back empty,
+/// so the screen — which is newlines by definition — arrived blank while
+/// reporting itself as observed. Every payload on this wire is bytes for this
+/// reason; this test is here so the next one is too.
+#[test]
+#[allow(clippy::expect_used, reason = "a failure here is a broken harness")]
+fn a_multi_line_screen_survives_the_wire() {
+    let reply = wire::ScreenReply {
+        source: moco_job::ScreenSource::Live,
+        rows: 40,
+        cols: 120,
+        bytes: b"DASHBOARD\n\n  status: green".to_vec(),
+    };
+
+    let encoded = wire::encode(&reply).expect("encode");
+    let back: wire::ScreenReply = wire::decode(&encoded).expect("decode");
+
+    assert_eq!(
+        back.bytes, reply.bytes,
+        "the screen must arrive as it was rendered"
+    );
+}
+
+/// The same hazard, driven through a real dispatch rather than a literal.
+#[test]
+#[allow(clippy::expect_used, reason = "a failure here is a broken harness")]
+fn a_screen_read_over_the_wire_is_not_blank() {
+    let reg = registry();
+
+    let request = wire::encode(&StartRequest {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "printf 'line-one\\nline-two'; sleep 5".into(),
+        ],
+        cwd: root().to_string_lossy().into_owned(),
+        deadline_ms: 0,
+        caller: wire::WireCaller::Console,
+    })
+    .expect("encode start");
+    let reply = wire::dispatch(&reg, "start", &request).expect("start dispatches");
+    let started: wire::StartReply = wire::decode(&reply).expect("decode start reply");
+
+    let ask = wire::encode(&wire::ScreenRequest {
+        id: started.id.clone(),
+    })
+    .expect("encode screen");
+
+    let mut text = String::new();
+    for _ in 0..100 {
+        let reply = wire::dispatch(&reg, "screen", &ask).expect("screen dispatches");
+        let screen: wire::ScreenReply = wire::decode(&reply).expect("decode screen reply");
+        text = String::from_utf8_lossy(&screen.bytes).into_owned();
+        if text.contains("line-two") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert!(text.contains("line-one"), "got: {text:?}");
+    assert!(
+        text.contains("line-two"),
+        "both lines must arrive, not just the first: {text:?}"
+    );
+
+    let _ = reg.kill(&moco_job::JobId(started.id), &moco_job::Caller::Console);
+}
