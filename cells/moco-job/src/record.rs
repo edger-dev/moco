@@ -87,6 +87,10 @@ pub struct JobRecord {
     /// started this and detached" are different facts, and only the first means
     /// something else may own its lifecycle.
     pub external: bool,
+    /// Whether a human watches it through a pty. Persisted, so a terminal job
+    /// re-adopted after a restart is still one (its screen and its input).
+    #[facet(default)]
+    pub human_view: crate::lens::HumanView,
 }
 
 impl JobRecord {
@@ -327,6 +331,7 @@ impl RecordStore {
             machine_format: String::new(),
             dropped: 0,
             external: false,
+            human_view: crate::lens::HumanView::Logs,
             pid: 0,
             pid_start: 0,
             capture: String::new(),
@@ -370,6 +375,7 @@ pub(crate) fn record_of(
     deadline_ms: u64,
     audited: bool,
     limits: crate::stats::Limits,
+    human_view: crate::lens::HumanView,
 ) -> JobRecord {
     JobRecord {
         limits,
@@ -393,5 +399,6 @@ pub(crate) fn record_of(
         capture: capture.to_string_lossy().into_owned(),
         deadline_ms,
         audited,
+        human_view,
     }
 }

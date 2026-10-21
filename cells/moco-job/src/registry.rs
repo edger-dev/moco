@@ -100,6 +100,7 @@ fn persist(store: &RecordStore, id: &JobId, handle: &JobHandle) -> Result<(), Jo
         handle.deadline.map(|d| d.as_millis() as u64).unwrap_or(0),
         handle.audited,
         handle.limits,
+        handle.human_view,
     ))
 }
 
@@ -360,10 +361,15 @@ struct JobHandle {
     /// approval spawns from its handle later). In memory only: they may be
     /// secrets, so they are never written to the registry's directory.
     env: Vec<(String, String)>,
-    /// The pty master, for writing input into a terminal job this daemon
-    /// spawned directly. `None` for a logs job, a held job (its input goes
-    /// through the holder's FIFO) and a re-adopted one.
-    pty_input: Option<File>,
+    /// The queue to this job's pty writer, for a terminal job this daemon
+    /// spawned directly: input is queued here and written by a thread of the
+    /// job's own, so a job that stops reading never blocks the registry.
+    /// `None` for a logs job, a held job (its input goes through the holder's
+    /// FIFO) and a re-adopted one.
+    pty_input: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    /// How many inputs were typed into it, and how many bytes: for the audit.
+    inputs: u64,
+    input_bytes: u64,
     /// Bytes discarded from the front of the capture by compaction. The
     /// difference between a logical offset and a position in the file.
     dropped: u64,
@@ -506,6 +512,10 @@ fn outcome_of(handle: &JobHandle) -> Outcome {
     }
 }
 
+/// Inputs queued for one direct terminal job before more are refused as "not
+/// reading": enough for a burst of typing, little enough to notice a stall.
+const INPUT_QUEUE: usize = 16;
+
 /// Spawn `argv` directly into an already-open, file-backed capture. Never goes
 /// through a shell, and never re-opens the capture by path.
 ///
@@ -522,7 +532,7 @@ fn spawn_child(
     human_view: HumanView,
     env: &[(String, String)],
     screen: &mut Option<Arc<Mutex<vt100::Parser>>>,
-    pty_input: &mut Option<File>,
+    pty_input: &mut Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
     pty_holder: Option<&Path>,
 ) -> Result<Child, JobError> {
     // **A terminal job under a holder is spawned as the holder.** The job then
@@ -570,8 +580,20 @@ fn spawn_child(
                 .map_err(|e| JobError::Audit(format!("could not allocate a pty: {e}")))?;
             let slave_err = pty.slave.try_clone().map_err(JobError::Io)?;
             let master = pty.master;
-            // A second handle on the master, for typing into the job.
-            *pty_input = Some(File::from(master.try_clone().map_err(JobError::Io)?));
+            // A second handle on the master, owned by a writer thread of this
+            // job's own; input reaches it through a short queue, so a job that
+            // stops reading fills the queue and is refused, never blocking.
+            let mut typed_into = File::from(master.try_clone().map_err(JobError::Io)?);
+            let (queue, typed) = std::sync::mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE);
+            std::thread::spawn(move || {
+                use std::io::Write;
+                for bytes in typed {
+                    if typed_into.write_all(&bytes).is_err() {
+                        break;
+                    }
+                }
+            });
+            *pty_input = Some(queue);
             let mut sink = capture.try_clone().map_err(JobError::Io)?;
 
             // **The screen is folded here, as the bytes go past.** The
@@ -814,9 +836,11 @@ impl JobRegistry {
                     restarts: record.restarts,
                     port: record.port,
                     port_env: String::new(),
-                    human_view: HumanView::Logs,
+                    human_view: record.human_view,
                     env: Vec::new(),
                     pty_input: None,
+                    inputs: 0,
+                    input_bytes: 0,
                     dropped: record.dropped,
                     machine_file: record.machine_file.clone(),
                     machine_format: record.machine_format.clone(),
@@ -1183,6 +1207,8 @@ impl JobRegistry {
             human_view: HumanView::Logs,
             env: Vec::new(),
             pty_input: None,
+            inputs: 0,
+            input_bytes: 0,
             dropped: 0,
             machine_file: String::new(),
             machine_format: String::new(),
@@ -1722,13 +1748,16 @@ impl JobRegistry {
             return None;
         }
         handle.audited = true;
-        Some(AuditRecord::new(
+        let mut record = AuditRecord::new(
             id.0.clone(),
             handle.argv.clone(),
             handle.resolved_cwd.clone(),
             handle.verdict,
             handle.status.clone(),
-        ))
+        );
+        record.inputs = handle.inputs;
+        record.input_bytes = handle.input_bytes;
+        Some(record)
     }
 
     /// Write a claimed record. **Call with the registry lock released**: a sink
@@ -1926,6 +1955,8 @@ impl JobRegistry {
             human_view: req.human_view,
             env: req.env.clone(),
             pty_input: None,
+            inputs: 0,
+            input_bytes: 0,
             dropped: 0,
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
@@ -2505,56 +2536,100 @@ impl JobRegistry {
         }
     }
 
-    /// Terminate a job. A running job is signalled and `wait` then reports it
-    /// `Killed`; a job still awaiting approval is withdrawn rather than left
-    /// pending until the approval timeout.
     /// Type `bytes` into a terminal job, as if at its keyboard.
     ///
-    /// Refused — never silently dropped — for a job of another workspace, a
-    /// job that is not a terminal, and one that is no longer running.
+    /// The human's intervention: only the console may type. Refused — never
+    /// silently dropped — for any other caller, an input over
+    /// [`crate::MAX_INPUT`] bytes, a job that is not a running terminal, and
+    /// one that is not reading its input.
     // implements: a-terminal-job-accepts-input
     pub fn input(&self, id: &JobId, bytes: &[u8], caller: &Caller) -> Result<(), JobError> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 
-        // Settle first: a finished job must not read as running.
-        let _ = self.tail(id, u64::MAX);
-        let mut inner = self.locked();
-        let handle = inner
-            .jobs
-            .get_mut(id)
-            .ok_or_else(|| JobError::NotFound(id.clone()))?;
-        if !caller.may_write(&handle.scope) {
-            return Err(JobError::ForeignWorkspace {
-                job: id.clone(),
-                owner: handle.scope.to_string(),
-                caller: caller.to_string(),
-            });
-        }
         let refuse = |reason: &str| JobError::InputRefused {
             job: id.clone(),
             reason: reason.to_string(),
         };
-        if handle.human_view != HumanView::Terminal {
-            return Err(refuse("it is not a terminal job"));
+        // Typing is the human's intervention: a session could type past the
+        // approval its argv was given.
+        if !matches!(caller, Caller::Console) {
+            return Err(refuse(
+                "typing into a job is the human's intervention; only the console may",
+            ));
         }
-        if handle.status != JobStatus::Running {
-            return Err(refuse("it is not running"));
+        if bytes.len() > crate::MAX_INPUT {
+            return Err(refuse(&format!(
+                "{} bytes in one input; send at most {} at a time",
+                bytes.len(),
+                crate::MAX_INPUT
+            )));
         }
-        if let Some(pty) = handle.pty_input.as_mut() {
-            return pty.write_all(bytes).map_err(JobError::Io);
+        // Settle first: a finished job must not read as running.
+        let _ = self.tail(id, u64::MAX);
+        // Under the lock only long enough to find the way in; never across a
+        // write, which could wait on a job that is not reading.
+        let way_in = {
+            let inner = self.locked();
+            let handle = inner
+                .jobs
+                .get(id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
+            if handle.human_view != HumanView::Terminal {
+                return Err(refuse("it is not a terminal job"));
+            }
+            if handle.status != JobStatus::Running {
+                return Err(refuse("it is not running"));
+            }
+            match &handle.pty_input {
+                Some(queue) => Ok(queue.clone()),
+                None => Err(crate::holder::HolderPaths::beside(handle.capture.clone()).input),
+            }
+        };
+        match way_in {
+            Ok(queue) => match queue.try_send(bytes.to_vec()) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    return Err(refuse("it is not reading its input"));
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(refuse("its terminal is closed"));
+                }
+            },
+            Err(fifo) => {
+                // Only the FIFO the holder made: never a symlink, never a
+                // plain file someone left at that path. Non-blocking, and at
+                // most one atomic pipe write, so it lands whole or not at all.
+                let mut pipe = std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(
+                        (nix::fcntl::OFlag::O_NONBLOCK | nix::fcntl::OFlag::O_NOFOLLOW).bits(),
+                    )
+                    .open(&fifo)
+                    .map_err(|_| refuse("no terminal is held for it"))?;
+                let is_fifo = pipe
+                    .metadata()
+                    .map(|m| m.file_type().is_fifo())
+                    .unwrap_or(false);
+                if !is_fifo {
+                    return Err(refuse("what is at its input path is not the holder's FIFO"));
+                }
+                match pipe.write(bytes) {
+                    Ok(n) if n == bytes.len() => {}
+                    Ok(_) | Err(_) => return Err(refuse("it is not reading its input")),
+                }
+            }
         }
-        // A held job: its holder reads the FIFO beside the capture. Opened
-        // without blocking, so a holder that is gone is a refusal, not a hang.
-        let fifo = crate::holder::HolderPaths::beside(handle.capture.clone()).input;
-        let mut pipe = std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
-            .open(&fifo)
-            .map_err(|_| refuse("no terminal is held for it (re-adopted without a holder?)"))?;
-        pipe.write_all(bytes).map_err(JobError::Io)
+        if let Some(handle) = self.locked().jobs.get_mut(id) {
+            handle.inputs += 1;
+            handle.input_bytes += bytes.len() as u64;
+        }
+        Ok(())
     }
 
+    /// Terminate a job. A running job is signalled and `wait` then reports it
+    /// `Killed`; a job still awaiting approval is withdrawn rather than left
+    /// pending until the approval timeout.
     pub fn kill(&self, id: &JobId, caller: &Caller) -> Result<(), JobError> {
         let claimed = {
             let mut inner = self.locked();
