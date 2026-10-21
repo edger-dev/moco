@@ -80,6 +80,12 @@ pub struct EnvVar {
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct StartReply {
     pub id: String,
+    /// How many environment variables were set (stub).
+    #[facet(default)]
+    pub env_set: u32,
+    /// The view the job was started under (stub).
+    #[facet(default)]
+    pub human_view: crate::lens::HumanView,
 }
 
 /// Read a job's output from an offset.
@@ -369,7 +375,14 @@ pub fn dispatch(
                 job = job.in_scope(scope);
             }
             let id = registry.start(job)?;
-            write(method, &StartReply { id: id.0 })
+            write(
+                method,
+                &StartReply {
+                    id: id.0,
+                    env_set: 0,
+                    human_view: Default::default(),
+                },
+            )
         }
         "input" => {
             let req: InputRequest = read(method, request)?;
@@ -447,12 +460,26 @@ pub fn dispatch(
         "start_named" => {
             let req: StartNamedRequest = read(method, request)?;
             let id = registry.start_named(&req.name, &req.caller.resolve())?;
-            write(method, &StartReply { id: id.0 })
+            write(
+                method,
+                &StartReply {
+                    id: id.0,
+                    env_set: 0,
+                    human_view: Default::default(),
+                },
+            )
         }
         "restart" => {
             let req: RestartRequest = read(method, request)?;
             let id = registry.restart(&JobId(req.id), &req.caller.resolve())?;
-            write(method, &StartReply { id: id.0 })
+            write(
+                method,
+                &StartReply {
+                    id: id.0,
+                    env_set: 0,
+                    human_view: Default::default(),
+                },
+            )
         }
         "ensure" => {
             let req: EnsureRequest = read(method, request)?;

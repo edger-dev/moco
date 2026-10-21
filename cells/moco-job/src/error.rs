@@ -56,6 +56,10 @@ pub enum JobError {
         owner: String,
         caller: String,
     },
+    /// A governed node was asked to start a job with an environment. The
+    /// rule-set matches argv alone, so variables could change what an allowed
+    /// argv runs; refused rather than let past the gate.
+    EnvUnderGovernance,
     /// Input was sent to a job that cannot take it: why.
     InputRefused { job: JobId, reason: String },
     /// The program could not be spawned. Names the binary **and** the PATH that
@@ -138,6 +142,12 @@ impl fmt::Display for JobError {
                 "'{name}' is a declared job's name, and a name only means \
                  something relative to a workspace's manifest — so the caller \
                  has to be a session in a workspace, not the console."
+            ),
+            JobError::EnvUnderGovernance => write!(
+                f,
+                "this node is governed, and its rule-set matches argv alone: a job \
+                 may not carry an environment here, which could change what an \
+                 allowed argv runs"
             ),
             JobError::InputRefused { job, reason } => {
                 write!(f, "job {job} takes no input: {reason}")

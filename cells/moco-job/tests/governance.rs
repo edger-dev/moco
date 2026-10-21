@@ -448,3 +448,18 @@ fn kill_withdraws_a_pending_job() {
         }
     );
 }
+
+/// The rule-set matches argv alone, so an environment could change what an
+/// allowed argv runs (PATH, LD_PRELOAD, …): a governed node refuses an
+/// environment outright rather than let it past the gate.
+// implements: adhoc-start-carries-env-and-view
+#[test]
+fn a_governed_node_refuses_a_start_carrying_an_environment() {
+    let reg = governed();
+    let job = JobRequest::new(argv(&["echo", "ok"]), root())
+        .with_env(vec![("PATH".into(), "/planted/bin".into())]);
+    assert!(
+        matches!(reg.start(job), Err(JobError::EnvUnderGovernance)),
+        "an allowed argv with an environment must not run"
+    );
+}

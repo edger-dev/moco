@@ -484,3 +484,59 @@ fn a_start_without_env_or_view_still_decodes() {
     let started: wire::StartReply = wire::decode(&reply).expect("decode");
     assert!(!started.id.is_empty());
 }
+
+/// A variable name that cannot be one — empty, holding `=`, or a NUL
+/// anywhere — is refused at the wire, not passed on to mean something else.
+// implements: adhoc-start-carries-env-and-view
+#[test]
+fn an_invalid_environment_is_refused_at_the_wire() {
+    let reg = registry();
+    for (name, value) in [("", "x"), ("A=B", "x"), ("A\0B", "x"), ("A", "x\0y")] {
+        let request = wire::encode(&StartRequest {
+            argv: vec!["true".into()],
+            cwd: root().to_string_lossy().into_owned(),
+            deadline_ms: 0,
+            caller: wire::WireCaller::Console,
+            env: vec![wire::EnvVar {
+                name: name.into(),
+                value: value.into(),
+            }],
+            human_view: moco_job::lens::HumanView::Logs,
+        })
+        .expect("encode");
+        assert!(
+            wire::dispatch(&reg, "start", &request).is_err(),
+            "{name:?}={value:?} must be refused"
+        );
+    }
+}
+
+/// The reply says what was applied, so a caller can tell a node that honoured
+/// the fields from an older one that silently ignored them.
+// implements: adhoc-start-carries-env-and-view
+#[test]
+fn the_start_reply_says_what_was_applied() {
+    let reg = registry();
+    let request = wire::encode(&StartRequest {
+        argv: vec!["sh".into(), "-c".into(), "sleep 1".into()],
+        cwd: root().to_string_lossy().into_owned(),
+        deadline_ms: 0,
+        caller: wire::WireCaller::Console,
+        env: vec![
+            wire::EnvVar {
+                name: "A".into(),
+                value: "1".into(),
+            },
+            wire::EnvVar {
+                name: "B".into(),
+                value: "2".into(),
+            },
+        ],
+        human_view: moco_job::lens::HumanView::Terminal,
+    })
+    .expect("encode");
+    let reply: wire::StartReply =
+        wire::decode(&wire::dispatch(&reg, "start", &request).expect("start")).expect("decode");
+    assert_eq!(reply.env_set, 2);
+    assert_eq!(reply.human_view, moco_job::lens::HumanView::Terminal);
+}
