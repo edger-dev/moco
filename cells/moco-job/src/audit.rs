@@ -64,6 +64,12 @@ pub struct AuditRecord {
     pub status: JobStatus,
     /// When the record was written, in milliseconds since the unix epoch.
     pub at_unix_ms: u64,
+    /// How many inputs a person typed into the job.
+    #[facet(default)]
+    pub inputs: u64,
+    /// How many bytes those inputs held — never what they said.
+    #[facet(default)]
+    pub input_bytes: u64,
 }
 
 impl AuditRecord {
@@ -87,6 +93,8 @@ impl AuditRecord {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
+            inputs: 0,
+            input_bytes: 0,
         }
     }
 }
@@ -236,6 +244,8 @@ impl AuditRecord {
             verdict: self.verdict,
             status: self.status.clone(),
             at_unix_ms: self.at_unix_ms,
+            inputs: self.inputs,
+            input_bytes: self.input_bytes,
         }
     }
 

@@ -125,3 +125,7 @@ impl Func for PreflightJob {
 // operator principal.
 //
 // implements: intervention-is-the-only-human-write
+
+/// The most bytes one input may carry: one atomic write to a pipe, so an
+/// input is delivered whole or refused whole.
+pub const MAX_INPUT: usize = 4096;
