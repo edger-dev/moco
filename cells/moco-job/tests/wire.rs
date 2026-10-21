@@ -36,6 +36,8 @@ fn start_and_wait_round_trip_over_bytes() {
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
         caller: wire::WireCaller::Console,
+        env: vec![],
+        human_view: moco_job::lens::HumanView::Logs,
     })
     .expect("encode start");
 
@@ -67,6 +69,8 @@ fn tail_returns_the_bytes_the_process_wrote() {
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
         caller: wire::WireCaller::Console,
+        env: vec![],
+        human_view: moco_job::lens::HumanView::Logs,
     })
     .expect("encode");
     let started: wire::StartReply =
@@ -142,6 +146,8 @@ fn an_unstartable_program_fails_across_the_wire() {
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
         caller: wire::WireCaller::Console,
+        env: vec![],
+        human_view: moco_job::lens::HumanView::Logs,
     })
     .expect("encode");
 
@@ -165,6 +171,8 @@ fn tail_settles_a_finished_job_without_a_separate_wait() {
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
         caller: wire::WireCaller::Console,
+        env: vec![],
+        human_view: moco_job::lens::HumanView::Logs,
     })
     .expect("encode");
     let started: wire::StartReply =
@@ -277,6 +285,8 @@ fn stats_round_trip_over_bytes() {
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
         caller: wire::WireCaller::Console,
+        env: vec![],
+        human_view: moco_job::lens::HumanView::Logs,
     })
     .expect("encode start");
     let reply = wire::dispatch(&reg, "start", &request).expect("start dispatches");
@@ -342,6 +352,8 @@ fn a_screen_read_over_the_wire_is_not_blank() {
         cwd: root().to_string_lossy().into_owned(),
         deadline_ms: 0,
         caller: wire::WireCaller::Console,
+        env: vec![],
+        human_view: moco_job::lens::HumanView::Logs,
     })
     .expect("encode start");
     let reply = wire::dispatch(&reg, "start", &request).expect("start dispatches");
@@ -370,4 +382,87 @@ fn a_screen_read_over_the_wire_is_not_blank() {
     );
 
     let _ = reg.kill(&moco_job::JobId(started.id), &moco_job::Caller::Console);
+}
+
+/// An ad-hoc start can set the job's environment: the launcher of an agent
+/// worker binds it to a context that way, with no shell string involved.
+// implements: adhoc-start-carries-env-and-view
+#[test]
+fn an_adhoc_start_sets_the_jobs_environment() {
+    let reg = registry();
+    let request = wire::encode(&StartRequest {
+        argv: vec!["sh".into(), "-c".into(), "echo \"$KUDO_X/$KUDO_Y\"".into()],
+        cwd: root().to_string_lossy().into_owned(),
+        deadline_ms: 0,
+        caller: wire::WireCaller::Console,
+        env: vec![
+            wire::EnvVar { name: "KUDO_X".into(), value: "first".into() },
+            wire::EnvVar { name: "KUDO_Y".into(), value: "y".into() },
+            wire::EnvVar { name: "KUDO_X".into(), value: "later".into() },
+        ],
+        human_view: moco_job::lens::HumanView::Logs,
+    })
+    .expect("encode");
+    let started: wire::StartReply =
+        wire::decode(&wire::dispatch(&reg, "start", &request).expect("start")).expect("decode");
+    let wait = wire::encode(&WaitRequest { id: started.id.clone() }).expect("encode wait");
+    wire::dispatch(&reg, "wait", &wait).expect("wait");
+    let tail = wire::encode(&TailRequest { id: started.id, offset: 0 }).expect("encode tail");
+    let out: wire::TailReply =
+        wire::decode(&wire::dispatch(&reg, "tail", &tail).expect("tail")).expect("decode");
+    assert_eq!(
+        String::from_utf8_lossy(&out.bytes).trim(),
+        "later/y",
+        "a later name overrides an earlier one"
+    );
+}
+
+/// An ad-hoc start can ask for a terminal, and what the job draws reads back
+/// through `screen`, as for a declared terminal job.
+// implements: adhoc-start-carries-env-and-view
+#[test]
+fn an_adhoc_start_can_ask_for_a_terminal() {
+    let reg = registry();
+    let request = wire::encode(&StartRequest {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "if [ -t 1 ]; then printf on-a-terminal; else printf piped; fi; sleep 2".into(),
+        ],
+        cwd: root().to_string_lossy().into_owned(),
+        deadline_ms: 0,
+        caller: wire::WireCaller::Console,
+        env: vec![],
+        human_view: moco_job::lens::HumanView::Terminal,
+    })
+    .expect("encode");
+    let started: wire::StartReply =
+        wire::decode(&wire::dispatch(&reg, "start", &request).expect("start")).expect("decode");
+    let mut text = String::new();
+    for _ in 0..40 {
+        let screen = wire::encode(&wire::ScreenRequest { id: started.id.clone() })
+            .expect("encode screen");
+        if let Ok(reply) = wire::dispatch(&reg, "screen", &screen) {
+            let out: wire::ScreenReply = wire::decode(&reply).expect("decode");
+            text = String::from_utf8_lossy(&out.bytes).into_owned();
+            if text.contains("on-a-terminal") || text.contains("piped") {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(text.contains("on-a-terminal"), "{text:?}");
+}
+
+/// A request written before the two fields existed still starts its job.
+#[test]
+fn a_start_without_env_or_view_still_decodes() {
+    let reg = registry();
+    let old = format!(
+        "{{argv (echo old-shape), cwd \"{}\", deadline_ms 0, caller @Console}}",
+        root().display()
+    );
+    let reply = wire::dispatch(&reg, "start", old.as_bytes()).expect("an old-shape start");
+    let started: wire::StartReply = wire::decode(&reply).expect("decode");
+    assert!(!started.id.is_empty());
 }

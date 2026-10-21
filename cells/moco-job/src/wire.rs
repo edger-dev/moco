@@ -60,6 +60,20 @@ pub struct StartRequest {
     pub deadline_ms: u64,
     /// Who is asking. The job is owned by that caller's workspace.
     pub caller: WireCaller,
+    /// Variables set for the job on top of the node's environment, in order;
+    /// a later name overrides an earlier one.
+    #[facet(default)]
+    pub env: Vec<EnvVar>,
+    /// `Logs` (the default) or `Terminal`, as in a declaration.
+    #[facet(default)]
+    pub human_view: crate::lens::HumanView,
+}
+
+/// One environment variable for a job.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 /// The id a started job was given.
