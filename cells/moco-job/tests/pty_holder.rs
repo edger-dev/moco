@@ -227,3 +227,28 @@ fn a_daemon_with_no_holder_still_runs_terminal_jobs() {
 
     let _ = reg.kill(&id, &Caller::Console);
 }
+
+/// A terminal job under the holder gets the variables it was started with,
+/// set on the holder's own environment and never on its command line.
+// implements: adhoc-start-carries-env-and-view
+#[test]
+fn a_held_terminal_job_gets_its_environment() {
+    let state = dir("held-env");
+    let reg = daemon(&state);
+    let job = moco_job::JobRequest::new(
+        ["sh", "-c", "printf \"bound-to-$KUDO_CONTEXT\"; sleep 3"],
+        dir("held-env-cwd"),
+    )
+    .with_env(vec![("KUDO_CONTEXT".into(), "ctx-42".into())])
+    .with_human_view(moco_job::lens::HumanView::Terminal);
+    let id = reg.start(job).expect("start");
+    assert!(
+        until(|| reg
+            .screen(&id)
+            .map(|s| s.text.contains("bound-to-ctx-42"))
+            .unwrap_or(false)),
+        "{:?}",
+        reg.screen(&id).map(|s| s.text)
+    );
+    let _ = reg.kill(&id, &Caller::Console);
+}
