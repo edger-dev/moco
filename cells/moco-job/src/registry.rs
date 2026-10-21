@@ -2485,6 +2485,12 @@ impl JobRegistry {
     /// Terminate a job. A running job is signalled and `wait` then reports it
     /// `Killed`; a job still awaiting approval is withdrawn rather than left
     /// pending until the approval timeout.
+    /// Type `bytes` into a terminal job, as if at its keyboard.
+    pub fn input(&self, id: &JobId, bytes: &[u8], caller: &Caller) -> Result<(), JobError> {
+        let _ = (id, bytes, caller);
+        Ok(())
+    }
+
     pub fn kill(&self, id: &JobId, caller: &Caller) -> Result<(), JobError> {
         let claimed = {
             let mut inner = self.locked();

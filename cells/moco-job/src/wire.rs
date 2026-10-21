@@ -143,6 +143,21 @@ pub struct ScreenReply {
     pub bytes: Vec<u8>,
 }
 
+/// Type bytes into a terminal job.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct InputRequest {
+    pub id: String,
+    pub bytes: Vec<u8>,
+    /// Who is typing: input is a write, scoped to the caller's workspace.
+    pub caller: WireCaller,
+}
+
+/// Input accepted.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct InputReply {
+    pub written: u64,
+}
+
 /// Read a job's recent resource history.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct StatsRequest {
