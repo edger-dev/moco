@@ -362,6 +362,23 @@ pub fn dispatch(
     match method {
         "start" => {
             let req: StartRequest = read(method, request)?;
+            // A name that cannot be one is refused here, not passed on to the
+            // spawn to mean something else (`A=B` reads as `A` set to `B=…`).
+            for var in &req.env {
+                if var.name.is_empty() || var.name.contains(['=', '\0']) || var.value.contains('\0')
+                {
+                    return Err(WireError::Request {
+                        method: method.to_string(),
+                        detail: format!(
+                            "environment variable {:?}: a name must be non-empty with no '=' \
+                             or NUL, a value must hold no NUL",
+                            var.name
+                        ),
+                    });
+                }
+            }
+            let applied_env = u32::try_from(req.env.len()).unwrap_or(u32::MAX);
+            let applied_view = req.human_view;
             let mut job = JobRequest::new(req.argv, PathBuf::from(req.cwd))
                 .with_env(req.env.into_iter().map(|v| (v.name, v.value)).collect())
                 .with_human_view(req.human_view);
@@ -379,8 +396,8 @@ pub fn dispatch(
                 method,
                 &StartReply {
                     id: id.0,
-                    env_set: 0,
-                    human_view: Default::default(),
+                    env_set: applied_env,
+                    human_view: applied_view,
                 },
             )
         }

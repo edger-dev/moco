@@ -356,9 +356,9 @@ struct JobHandle {
     port: u16,
     /// Whether a human watches this through a pty.
     human_view: HumanView,
-    /// Variables the job was started with, kept for a restart. In memory
-    /// only: they may be secrets, so they are never written to the registry's
-    /// directory, and a job re-adopted after a daemon restart has none.
+    /// Variables the job was started with, kept until it spawns (a job pending
+    /// approval spawns from its handle later). In memory only: they may be
+    /// secrets, so they are never written to the registry's directory.
     env: Vec<(String, String)>,
     /// The pty master, for writing input into a terminal job this daemon
     /// spawned directly. `None` for a logs job, a held job (its input goes
@@ -1830,6 +1830,13 @@ impl JobRegistry {
     pub fn start(&self, req: JobRequest) -> Result<JobId, JobError> {
         if req.argv.is_empty() {
             return Err(JobError::EmptyArgv);
+        }
+        // The rule-set matches argv alone; variables could change what an
+        // allowed argv runs (PATH, LD_PRELOAD, …). Fail closed until the
+        // rule-set can speak about them.
+        // implements: adhoc-start-carries-env-and-view
+        if self.policy.is_some() && !req.env.is_empty() {
+            return Err(JobError::EnvUnderGovernance);
         }
 
         // Confine the cwd before anything else: a request that cannot name a

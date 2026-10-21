@@ -212,7 +212,6 @@ impl JobRequest {
         self
     }
 
-    /// Run this job under a pty, so it draws as it would for a person.
     /// Set these variables for the job, on top of the node's environment.
     // implements: adhoc-start-carries-env-and-view
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
@@ -220,6 +219,7 @@ impl JobRequest {
         self
     }
 
+    /// Run this job under a pty, so it draws as it would for a person.
     pub fn with_human_view(mut self, view: crate::lens::HumanView) -> Self {
         self.human_view = view;
         self
