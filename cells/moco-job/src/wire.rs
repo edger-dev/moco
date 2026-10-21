@@ -341,7 +341,9 @@ pub fn dispatch(
     match method {
         "start" => {
             let req: StartRequest = read(method, request)?;
-            let mut job = JobRequest::new(req.argv, PathBuf::from(req.cwd));
+            let mut job = JobRequest::new(req.argv, PathBuf::from(req.cwd))
+                .with_env(req.env.into_iter().map(|v| (v.name, v.value)).collect())
+                .with_human_view(req.human_view);
             if req.deadline_ms > 0 {
                 job = job.with_deadline(Duration::from_millis(req.deadline_ms));
             }

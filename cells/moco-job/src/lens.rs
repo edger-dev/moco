@@ -53,6 +53,7 @@ pub struct MachineRead {
 /// watched through a pipe is not the same program as one watched through a
 /// terminal.
 #[derive(Facet, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[facet(default)]
 #[repr(u8)]
 pub enum HumanView {
     /// An append-only stream. Its stdio is an ordinary file, so tools that

@@ -396,18 +396,34 @@ fn an_adhoc_start_sets_the_jobs_environment() {
         deadline_ms: 0,
         caller: wire::WireCaller::Console,
         env: vec![
-            wire::EnvVar { name: "KUDO_X".into(), value: "first".into() },
-            wire::EnvVar { name: "KUDO_Y".into(), value: "y".into() },
-            wire::EnvVar { name: "KUDO_X".into(), value: "later".into() },
+            wire::EnvVar {
+                name: "KUDO_X".into(),
+                value: "first".into(),
+            },
+            wire::EnvVar {
+                name: "KUDO_Y".into(),
+                value: "y".into(),
+            },
+            wire::EnvVar {
+                name: "KUDO_X".into(),
+                value: "later".into(),
+            },
         ],
         human_view: moco_job::lens::HumanView::Logs,
     })
     .expect("encode");
     let started: wire::StartReply =
         wire::decode(&wire::dispatch(&reg, "start", &request).expect("start")).expect("decode");
-    let wait = wire::encode(&WaitRequest { id: started.id.clone() }).expect("encode wait");
+    let wait = wire::encode(&WaitRequest {
+        id: started.id.clone(),
+    })
+    .expect("encode wait");
     wire::dispatch(&reg, "wait", &wait).expect("wait");
-    let tail = wire::encode(&TailRequest { id: started.id, offset: 0 }).expect("encode tail");
+    let tail = wire::encode(&TailRequest {
+        id: started.id,
+        offset: 0,
+    })
+    .expect("encode tail");
     let out: wire::TailReply =
         wire::decode(&wire::dispatch(&reg, "tail", &tail).expect("tail")).expect("decode");
     assert_eq!(
@@ -440,8 +456,10 @@ fn an_adhoc_start_can_ask_for_a_terminal() {
         wire::decode(&wire::dispatch(&reg, "start", &request).expect("start")).expect("decode");
     let mut text = String::new();
     for _ in 0..40 {
-        let screen = wire::encode(&wire::ScreenRequest { id: started.id.clone() })
-            .expect("encode screen");
+        let screen = wire::encode(&wire::ScreenRequest {
+            id: started.id.clone(),
+        })
+        .expect("encode screen");
         if let Ok(reply) = wire::dispatch(&reg, "screen", &screen) {
             let out: wire::ScreenReply = wire::decode(&reply).expect("decode");
             text = String::from_utf8_lossy(&out.bytes).into_owned();

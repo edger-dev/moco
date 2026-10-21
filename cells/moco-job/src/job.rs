@@ -136,6 +136,10 @@ pub struct JobRequest {
     pub port_env: String,
     /// Whether a human watches this through a pty.
     pub human_view: crate::lens::HumanView,
+    /// Variables set for the job on top of the node's environment, in order
+    /// (a later name overrides an earlier one). The port variable, when the
+    /// node allocates one, is set after these: it is the node's to set.
+    pub env: Vec<(String, String)>,
     /// The declared machine-lens sidecar, relative to the job's directory.
     pub machine_file: String,
     /// What is in it.
@@ -166,6 +170,7 @@ impl JobRequest {
             port: None,
             port_env: String::new(),
             human_view: crate::lens::HumanView::Logs,
+            env: Vec::new(),
             machine_file: String::new(),
             machine_format: String::new(),
             limits: crate::stats::Limits::default(),
@@ -208,6 +213,13 @@ impl JobRequest {
     }
 
     /// Run this job under a pty, so it draws as it would for a person.
+    /// Set these variables for the job, on top of the node's environment.
+    // implements: adhoc-start-carries-env-and-view
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
+
     pub fn with_human_view(mut self, view: crate::lens::HumanView) -> Self {
         self.human_view = view;
         self

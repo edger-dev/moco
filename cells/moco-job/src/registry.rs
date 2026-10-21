@@ -151,8 +151,12 @@ fn spawn_holder(
     capture_path: &Path,
     port: Option<u16>,
     port_env: &str,
+    env: &[(String, String)],
 ) -> Result<Child, JobError> {
     let mut command = Command::new(holder);
+    // On the holder's own environment, which the job inherits — never as
+    // `--env` arguments, which anyone on the machine could read in `ps`.
+    command.envs(env.iter().map(|(k, v)| (k, v)));
     command
         .arg("--cwd")
         .arg(cwd)
@@ -352,6 +356,10 @@ struct JobHandle {
     port: u16,
     /// Whether a human watches this through a pty.
     human_view: HumanView,
+    /// Variables the job was started with, kept for a restart. In memory
+    /// only: they may be secrets, so they are never written to the registry's
+    /// directory, and a job re-adopted after a daemon restart has none.
+    env: Vec<(String, String)>,
     /// Bytes discarded from the front of the capture by compaction. The
     /// difference between a logical offset and a position in the file.
     dropped: u64,
@@ -508,6 +516,7 @@ fn spawn_child(
     port: Option<u16>,
     port_env: &str,
     human_view: HumanView,
+    env: &[(String, String)],
     screen: &mut Option<Arc<Mutex<vt100::Parser>>>,
     pty_holder: Option<&Path>,
 ) -> Result<Child, JobError> {
@@ -520,7 +529,7 @@ fn spawn_child(
     // `tail`, compaction, liveness, restart policy and stop all keep working
     // without knowing a holder is involved.
     if let (HumanView::Terminal, Some(holder)) = (human_view, pty_holder) {
-        return spawn_holder(holder, argv, cwd, capture_path, port, port_env);
+        return spawn_holder(holder, argv, cwd, capture_path, port, port_env, env);
     }
 
     let (program, args) = argv.split_first().ok_or(JobError::EmptyArgv)?;
@@ -614,6 +623,8 @@ fn spawn_child(
     };
 
     let mut command = Command::new(program);
+    // The caller's variables first; the port, the node's own, after them.
+    command.envs(env.iter().map(|(k, v)| (k, v)));
     if let Some(port) = port {
         // Delivery is env injection. `sh -c` is not involved, so nothing here
         // expands: a program that wants the port on its command line uses the
@@ -797,6 +808,7 @@ impl JobRegistry {
                     port: record.port,
                     port_env: String::new(),
                     human_view: HumanView::Logs,
+                    env: Vec::new(),
                     dropped: record.dropped,
                     machine_file: record.machine_file.clone(),
                     machine_format: record.machine_format.clone(),
@@ -1161,6 +1173,7 @@ impl JobRegistry {
             port: 0,
             port_env: String::new(),
             human_view: HumanView::Logs,
+            env: Vec::new(),
             dropped: 0,
             machine_file: String::new(),
             machine_format: String::new(),
@@ -1855,6 +1868,7 @@ impl JobRegistry {
             port: req.port,
             port_env: req.port_env.clone(),
             human_view: req.human_view,
+            env: req.env.clone(),
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
             limits: req.limits,
@@ -1894,6 +1908,7 @@ impl JobRegistry {
             port: req.port.unwrap_or(0),
             port_env: req.port_env.clone(),
             human_view: req.human_view,
+            env: req.env.clone(),
             dropped: 0,
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
@@ -1922,6 +1937,7 @@ impl JobRegistry {
                     handle.port_request(),
                     handle.port_env_or_default(),
                     handle.human_view,
+                    &handle.env,
                     &mut screen,
                     self.pty_holder.as_deref(),
                 ) {
@@ -2132,6 +2148,7 @@ impl JobRegistry {
                         handle.port_request(),
                         handle.port_env_or_default(),
                         handle.human_view,
+                        &handle.env,
                         &mut screen,
                         self.pty_holder.as_deref(),
                     ) {
