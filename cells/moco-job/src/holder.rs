@@ -42,6 +42,9 @@ pub struct HolderPaths {
     pub screen: PathBuf,
     /// The **job's** pid, as opposed to the holder's.
     pub job_pid: PathBuf,
+    /// A FIFO the holder reads and copies to the pty: how input reaches a
+    /// held job, with no socket and no listener to be present.
+    pub input: PathBuf,
 }
 
 impl HolderPaths {
@@ -52,6 +55,7 @@ impl HolderPaths {
         Self {
             screen: capture.with_extension("screen"),
             job_pid: capture.with_extension("jobpid"),
+            input: capture.with_extension("input"),
             capture,
         }
     }
@@ -156,6 +160,32 @@ pub fn run(config: HolderConfig) -> Result<i32, JobError> {
         }
     });
 
+    // **Input through a FIFO beside the capture.** Opened read-write, so it
+    // never reads end-of-file as typists come and go; whatever is written to
+    // it goes to the pty as if typed. Owner-only, like everything else here.
+    // implements: a-terminal-job-accepts-input
+    let _ = std::fs::remove_file(&config.paths.input);
+    if nix::unistd::mkfifo(
+        &config.paths.input,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .is_ok()
+    {
+        let mut typed_into = File::from(pty.master.try_clone().map_err(JobError::Io)?);
+        let input = config.paths.input.clone();
+        std::thread::spawn(move || {
+            let Ok(mut fifo) = File::options().read(true).write(true).open(&input) else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = fifo.read(&mut buf) {
+                if n == 0 || typed_into.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     let mut master = File::from(pty.master);
     let mut buf = [0u8; 8192];
     loop {
@@ -185,6 +215,7 @@ pub fn run(config: HolderConfig) -> Result<i32, JobError> {
 
     let status = child.wait().map_err(JobError::Io)?;
     let _ = std::fs::remove_file(&config.paths.job_pid);
+    let _ = std::fs::remove_file(&config.paths.input);
     Ok(status.code().unwrap_or(-1))
 }
 

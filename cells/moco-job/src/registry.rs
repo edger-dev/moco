@@ -360,6 +360,10 @@ struct JobHandle {
     /// only: they may be secrets, so they are never written to the registry's
     /// directory, and a job re-adopted after a daemon restart has none.
     env: Vec<(String, String)>,
+    /// The pty master, for writing input into a terminal job this daemon
+    /// spawned directly. `None` for a logs job, a held job (its input goes
+    /// through the holder's FIFO) and a re-adopted one.
+    pty_input: Option<File>,
     /// Bytes discarded from the front of the capture by compaction. The
     /// difference between a logical offset and a position in the file.
     dropped: u64,
@@ -518,6 +522,7 @@ fn spawn_child(
     human_view: HumanView,
     env: &[(String, String)],
     screen: &mut Option<Arc<Mutex<vt100::Parser>>>,
+    pty_input: &mut Option<File>,
     pty_holder: Option<&Path>,
 ) -> Result<Child, JobError> {
     // **A terminal job under a holder is spawned as the holder.** The job then
@@ -565,6 +570,8 @@ fn spawn_child(
                 .map_err(|e| JobError::Audit(format!("could not allocate a pty: {e}")))?;
             let slave_err = pty.slave.try_clone().map_err(JobError::Io)?;
             let master = pty.master;
+            // A second handle on the master, for typing into the job.
+            *pty_input = Some(File::from(master.try_clone().map_err(JobError::Io)?));
             let mut sink = capture.try_clone().map_err(JobError::Io)?;
 
             // **The screen is folded here, as the bytes go past.** The
@@ -809,6 +816,7 @@ impl JobRegistry {
                     port_env: String::new(),
                     human_view: HumanView::Logs,
                     env: Vec::new(),
+                    pty_input: None,
                     dropped: record.dropped,
                     machine_file: record.machine_file.clone(),
                     machine_format: record.machine_format.clone(),
@@ -1174,6 +1182,7 @@ impl JobRegistry {
             port_env: String::new(),
             human_view: HumanView::Logs,
             env: Vec::new(),
+            pty_input: None,
             dropped: 0,
             machine_file: String::new(),
             machine_format: String::new(),
@@ -1909,6 +1918,7 @@ impl JobRegistry {
             port_env: req.port_env.clone(),
             human_view: req.human_view,
             env: req.env.clone(),
+            pty_input: None,
             dropped: 0,
             machine_file: req.machine_file.clone(),
             machine_format: req.machine_format.clone(),
@@ -1929,6 +1939,7 @@ impl JobRegistry {
                 // actually succeeded, so a failed start leaves no parser behind
                 // for a process that never drew anything.
                 let mut screen = None;
+                let mut pty_input = None;
                 match spawn_child(
                     &spawn_argv,
                     &request.cwd,
@@ -1939,10 +1950,12 @@ impl JobRegistry {
                     handle.human_view,
                     &handle.env,
                     &mut screen,
+                    &mut pty_input,
                     self.pty_holder.as_deref(),
                 ) {
                     Ok(child) => {
                         handle.screen = screen;
+                        handle.pty_input = pty_input;
                         handle.pid = child.id();
                         // Recorded at spawn: this is what makes a later probe
                         // able to tell this process from a reused pid.
@@ -2140,6 +2153,7 @@ impl JobRegistry {
                     };
                     let spawn_argv = port::substitute(&argv, handle.port_request());
                     let mut screen = None;
+                    let mut pty_input = None;
                     match spawn_child(
                         &spawn_argv,
                         &cwd,
@@ -2150,10 +2164,12 @@ impl JobRegistry {
                         handle.human_view,
                         &handle.env,
                         &mut screen,
+                        &mut pty_input,
                         self.pty_holder.as_deref(),
                     ) {
                         Ok(child) => {
                             handle.screen = screen;
+                            handle.pty_input = pty_input;
                             handle.pid = child.id();
                             handle.pid_start = procfs::start_time(handle.pid).unwrap_or(0);
                             handle.child = Some(child);
@@ -2486,9 +2502,50 @@ impl JobRegistry {
     /// `Killed`; a job still awaiting approval is withdrawn rather than left
     /// pending until the approval timeout.
     /// Type `bytes` into a terminal job, as if at its keyboard.
+    ///
+    /// Refused — never silently dropped — for a job of another workspace, a
+    /// job that is not a terminal, and one that is no longer running.
+    // implements: a-terminal-job-accepts-input
     pub fn input(&self, id: &JobId, bytes: &[u8], caller: &Caller) -> Result<(), JobError> {
-        let _ = (id, bytes, caller);
-        Ok(())
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Settle first: a finished job must not read as running.
+        let _ = self.tail(id, u64::MAX);
+        let mut inner = self.locked();
+        let handle = inner
+            .jobs
+            .get_mut(id)
+            .ok_or_else(|| JobError::NotFound(id.clone()))?;
+        if !caller.may_write(&handle.scope) {
+            return Err(JobError::ForeignWorkspace {
+                job: id.clone(),
+                owner: handle.scope.to_string(),
+                caller: caller.to_string(),
+            });
+        }
+        let refuse = |reason: &str| JobError::InputRefused {
+            job: id.clone(),
+            reason: reason.to_string(),
+        };
+        if handle.human_view != HumanView::Terminal {
+            return Err(refuse("it is not a terminal job"));
+        }
+        if handle.status != JobStatus::Running {
+            return Err(refuse("it is not running"));
+        }
+        if let Some(pty) = handle.pty_input.as_mut() {
+            return pty.write_all(bytes).map_err(JobError::Io);
+        }
+        // A held job: its holder reads the FIFO beside the capture. Opened
+        // without blocking, so a holder that is gone is a refusal, not a hang.
+        let fifo = crate::holder::HolderPaths::beside(handle.capture.clone()).input;
+        let mut pipe = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+            .open(&fifo)
+            .map_err(|_| refuse("no terminal is held for it (re-adopted without a holder?)"))?;
+        pipe.write_all(bytes).map_err(JobError::Io)
     }
 
     pub fn kill(&self, id: &JobId, caller: &Caller) -> Result<(), JobError> {

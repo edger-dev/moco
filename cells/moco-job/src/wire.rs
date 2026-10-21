@@ -371,6 +371,16 @@ pub fn dispatch(
             let id = registry.start(job)?;
             write(method, &StartReply { id: id.0 })
         }
+        "input" => {
+            let req: InputRequest = read(method, request)?;
+            registry.input(&JobId(req.id), &req.bytes, &req.caller.resolve())?;
+            write(
+                method,
+                &InputReply {
+                    written: req.bytes.len() as u64,
+                },
+            )
+        }
         "tail" => {
             let req: TailRequest = read(method, request)?;
             let tail = registry.tail(&JobId(req.id), req.offset)?;
@@ -503,6 +513,7 @@ pub const METHODS: &[&str] = &[
     "stats",
     "wait",
     "kill",
+    "input",
     "list",
 ];
 
