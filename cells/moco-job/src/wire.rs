@@ -273,12 +273,14 @@ pub struct JobSummary {
     ///
     /// implements: a-job-listing-says-what-each-job-runs
     pub argv: Vec<String>,
-    /// The directory it runs in.
+    /// The directory it runs in — the requested one while it waits for a
+    /// verdict, the confined one once it runs.
     pub cwd: String,
     /// The authority it resolved under, so far.
     pub verdict: crate::Verdict,
     /// Seconds its current phase has lasted: waiting for a verdict, or since
-    /// it was spawned.
+    /// it was spawned (counted from re-adoption after a daemon restart); 0
+    /// once it has ended.
     pub phase_s: u64,
 }
 

@@ -1802,10 +1802,16 @@ impl JobRegistry {
         out
     }
 
-    /// How long a job's current phase has lasted: waiting for a verdict, or
-    /// since it was spawned.
+    /// How long a live job's current phase has lasted: waiting for a verdict,
+    /// or since it was spawned — counted by this daemon, so after a restart
+    /// from re-adoption. `None` once the job has ended: when it ended is not
+    /// kept, and a clock still running would read as a long run.
     pub fn phase_of(&self, id: &JobId) -> Option<Duration> {
-        self.locked().jobs.get(id).map(|h| h.started.elapsed())
+        self.locked()
+            .jobs
+            .get(id)
+            .filter(|h| !h.status.is_terminal())
+            .map(|h| h.started.elapsed())
     }
 
     /// The authority a job resolved under, so far.

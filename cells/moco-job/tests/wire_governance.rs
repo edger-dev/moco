@@ -449,6 +449,11 @@ fn listed(reg: &JobRegistry, id: &str) -> wire::JobSummary {
 fn a_listing_says_what_each_job_runs() {
     let reg = governed();
     let allowed = start(&reg, &["echo", "ok"]);
+    let wait = wire::encode(&WaitRequest {
+        id: allowed.clone(),
+    })
+    .expect("encode wait");
+    wire::dispatch(&reg, "wait", &wait).expect("wait");
     let waiting = start(&reg, &["echo", "unlisted"]);
     std::thread::sleep(Duration::from_millis(1100));
 
@@ -456,6 +461,7 @@ fn a_listing_says_what_each_job_runs() {
     assert_eq!(ran.argv, argv(&["echo", "ok"]));
     assert_eq!(ran.verdict, Verdict::SeedAllow);
     assert!(!ran.cwd.is_empty(), "the directory is said");
+    assert_eq!(ran.phase_s, 0, "an ended job's clock does not run on");
 
     let pending = listed(&reg, &waiting);
     assert_eq!(pending.status, JobStatus::PendingApproval);
