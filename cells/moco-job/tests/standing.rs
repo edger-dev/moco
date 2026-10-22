@@ -215,7 +215,7 @@ fn an_argv_spelling_a_boolean_round_trips() {
     {
         let reg = governed_in(&dir);
         let id = reg
-            .start(JobRequest::new(["/bin/true", "true"], root()))
+            .start(JobRequest::new(["echo", "true"], root()))
             .unwrap();
         reg.decide(&id, Decision::allow_always()).unwrap();
         reg.wait(&id).unwrap();
@@ -224,7 +224,7 @@ fn an_argv_spelling_a_boolean_round_trips() {
     assert!(
         reg.standing()
             .allow_rules()
-            .contains(&argv(&["/bin/true", "true"])),
+            .contains(&argv(&["echo", "true"])),
         "got {:?}",
         reg.standing().allow_rules()
     );

@@ -17,8 +17,9 @@ use crate::port::{self, PortRange};
 use crate::preflight::Preflight;
 use crate::procfs::{self, Liveness};
 use crate::record::{RecordStore, record_of};
-use crate::rules::{Decision, Disposition, NodePolicy};
+use crate::rules::{Decision, Disposition, NodePolicy, RuleSet};
 use crate::scope::{Caller, Scope};
+use crate::standing::Standing;
 use crate::stats::{Breach, Limits, Sample, Stats};
 use nix::sys::signal::Signal;
 
@@ -706,6 +707,9 @@ pub struct JobRegistry {
     /// Deliberately no `Default`/`new()`: an ungoverned registry must be asked
     /// for by name so it can never be produced by `..Default::default()`.
     policy: Option<NodePolicy>,
+    /// The rules the *always* verdicts wrote, layered on the policy's seed.
+    /// Its own lock, never held with `inner`'s.
+    standing: Mutex<Standing>,
     /// Where terminal records are appended. Always present, so every registry
     /// has a history even when no durable sink was configured.
     audit: Arc<dyn AuditSink>,
@@ -736,12 +740,15 @@ impl JobRegistry {
     /// root. Use [`JobRegistry::with_dir`] to point it at a shared node
     /// directory and re-adopt what is already there.
     pub fn ungoverned() -> Result<Self, JobError> {
+        let store = RecordStore::private()?;
+        let standing = Standing::load(store.dir())?;
         Ok(Self {
             inner: Mutex::new(Inner {
                 jobs: HashMap::new(),
-                store: RecordStore::private()?,
+                store,
             }),
             policy: None,
+            standing: Mutex::new(standing),
             audit: Arc::new(MemoryAuditLog::new()),
             capture_cap: DEFAULT_CAPTURE_CAP,
             kill_grace: DEFAULT_KILL_GRACE,
@@ -754,12 +761,15 @@ impl JobRegistry {
     ///
     /// implements: governed-command-is-a-job
     pub fn with_policy(policy: NodePolicy) -> Result<Self, JobError> {
+        let store = RecordStore::private()?;
+        let standing = Standing::load(store.dir())?;
         Ok(Self {
             inner: Mutex::new(Inner {
                 jobs: HashMap::new(),
-                store: RecordStore::private()?,
+                store,
             }),
             policy: Some(policy),
+            standing: Mutex::new(standing),
             audit: Arc::new(MemoryAuditLog::new()),
             capture_cap: DEFAULT_CAPTURE_CAP,
             kill_grace: DEFAULT_KILL_GRACE,
@@ -780,6 +790,9 @@ impl JobRegistry {
     /// implements: registry-is-node-state-on-disk
     pub fn with_dir(mut self, dir: impl Into<PathBuf>) -> Result<Self, JobError> {
         let store = RecordStore::open(dir)?;
+        // The standing rules are node state too: what a human granted or
+        // barred before the restart still holds.
+        let standing = Standing::load(store.dir())?;
         let mut jobs = HashMap::new();
 
         for record in store.all()? {
@@ -865,6 +878,7 @@ impl JobRegistry {
         // Field assignment rather than a struct update: `JobRegistry` implements
         // `Drop`, so it cannot be moved out of.
         self.inner = Mutex::new(inner);
+        self.standing = Mutex::new(standing);
         Ok(self)
     }
 
@@ -1717,8 +1731,14 @@ impl JobRegistry {
     /// to grant.
     ///
     /// implements: agent-self-sufficiency
-    pub fn standing(&self) -> crate::rules::RuleSet {
-        crate::rules::RuleSet::default()
+    pub fn standing(&self) -> RuleSet {
+        self.standing_locked().rules().clone()
+    }
+
+    fn standing_locked(&self) -> MutexGuard<'_, Standing> {
+        self.standing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The node's governance, for read-only introspection. The agent may see
@@ -1819,10 +1839,26 @@ impl JobRegistry {
 
     /// The disposition this registry gives an argv.
     fn disposition(&self, argv: &[String]) -> Disposition {
-        match &self.policy {
-            Some(policy) => policy.rules.evaluate(argv),
-            // Ungoverned: nothing gates the spawn.
-            None => Disposition::Allow,
+        self.gate(argv).0
+    }
+
+    /// The disposition an argv gets, and the authority behind it: the seed
+    /// and the standing overlay together, **deny beating allow** across both.
+    ///
+    /// implements: four-verdicts-exact-argv
+    fn gate(&self, argv: &[String]) -> (Disposition, Verdict) {
+        // Ungoverned: nothing gates the spawn.
+        let Some(policy) = &self.policy else {
+            return (Disposition::Allow, Verdict::Ungoverned);
+        };
+        let seed = policy.rules.evaluate(argv);
+        let standing = self.standing_locked().rules().evaluate(argv);
+        match (seed, standing) {
+            (Disposition::Deny, _) => (Disposition::Deny, Verdict::SeedDeny),
+            (_, Disposition::Deny) => (Disposition::Deny, Verdict::StandingDeny),
+            (Disposition::Allow, _) => (Disposition::Allow, Verdict::SeedAllow),
+            (_, Disposition::Allow) => (Disposition::Allow, Verdict::StandingAllow),
+            _ => (Disposition::NeedsApproval, Verdict::NoApprover),
         }
     }
 
@@ -1902,7 +1938,7 @@ impl JobRegistry {
             .scope
             .clone()
             .unwrap_or_else(|| Scope::resolve(&req.cwd));
-        let disposition = self.disposition(&req.argv);
+        let (disposition, gate_verdict) = self.gate(&req.argv);
 
         let mut inner = self.locked();
         // Minting claims the id on disk, so two daemons sharing this directory
@@ -1945,12 +1981,7 @@ impl JobRegistry {
             pending: None,
             // A pending job's default fate is the fail-closed one; a decision
             // overrides it.
-            verdict: match disposition {
-                Disposition::Allow if self.policy.is_none() => Verdict::Ungoverned,
-                Disposition::Allow => Verdict::SeedAllow,
-                Disposition::Deny => Verdict::SeedDeny,
-                Disposition::NeedsApproval => Verdict::NoApprover,
-            },
+            verdict: gate_verdict,
             resolved_cwd: request.cwd.clone(),
             argv: request.argv.clone(),
             audited: false,
@@ -2115,10 +2146,48 @@ impl JobRegistry {
             }
             | Decision::AllowAlways {
                 edited_argv: Some(argv),
-            } => Some(self.disposition(argv)),
+            } => Some(self.gate(argv)),
             _ => None,
         };
         let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
+
+        // An *always* verdict writes its rule first. A write that fails fails
+        // the decision and leaves the job pending, so the human can still
+        // choose once. No rule is written for an argv a rule already decides —
+        // a standing allow never launders a deny — nor for a decision that
+        // arrived after the approval window.
+        // implements: four-verdicts-exact-argv
+        let always = matches!(
+            decision,
+            Decision::AllowAlways { .. } | Decision::DenyAlways
+        );
+        if always {
+            let proposed = {
+                let inner = self.locked();
+                let handle = inner
+                    .jobs
+                    .get(id)
+                    .ok_or_else(|| JobError::NotFound(id.clone()))?;
+                let late = approval_timeout.is_some_and(|t| handle.started.elapsed() >= t);
+                match (&handle.status, &handle.pending) {
+                    (JobStatus::PendingApproval, Some(request)) => {
+                        (!late).then(|| request.argv.clone())
+                    }
+                    _ => return Err(JobError::NotPending(id.clone())),
+                }
+            };
+            if let Some(proposed) = proposed {
+                let (allow, argv) = match &decision {
+                    Decision::AllowAlways { edited_argv } => {
+                        (true, edited_argv.clone().unwrap_or(proposed))
+                    }
+                    _ => (false, proposed),
+                };
+                if self.disposition(&argv) == Disposition::NeedsApproval {
+                    self.standing_locked().add(allow, argv)?;
+                }
+            }
+        }
 
         // The whole decision runs under the lock and yields *what to audit*;
         // the write itself happens after the lock is released, below. Doing it
@@ -2151,11 +2220,11 @@ impl JobRegistry {
                 return Ok(());
             }
 
-            if edited_disposition == Some(Disposition::Deny) {
+            if let Some((Disposition::Deny, verdict)) = edited_disposition {
                 handle.status = JobStatus::Denied {
                     reason: DeniedReason::Rule,
                 };
-                handle.verdict = Verdict::SeedDeny;
+                handle.verdict = verdict;
                 handle.pending = None;
                 claimed = self.claim(id, handle);
                 let _ = persist(store, id, handle);
@@ -2172,7 +2241,11 @@ impl JobRegistry {
                     handle.status = JobStatus::Denied {
                         reason: DeniedReason::Decision,
                     };
-                    handle.verdict = Verdict::RejectedOnce;
+                    handle.verdict = if always {
+                        Verdict::RejectedAlways
+                    } else {
+                        Verdict::RejectedOnce
+                    };
                     claimed = self.claim(id, handle);
                     let _ = persist(store, id, handle);
                     return Ok(());
@@ -2226,7 +2299,11 @@ impl JobRegistry {
                             handle.status = JobStatus::Running;
                             // The approval is the authority, and the argv that
                             // ran is what the record must name.
-                            handle.verdict = Verdict::ApprovedOnce;
+                            handle.verdict = if always {
+                                Verdict::ApprovedAlways
+                            } else {
+                                Verdict::ApprovedOnce
+                            };
                             handle.argv = argv;
                             handle.resolved_cwd = cwd;
                             // The execution deadline runs from the spawn, not

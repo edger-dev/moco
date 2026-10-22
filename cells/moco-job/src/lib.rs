@@ -22,6 +22,7 @@ pub mod record;
 pub mod registry;
 pub mod rules;
 pub mod scope;
+pub mod standing;
 pub mod stats;
 pub mod wire;
 
@@ -41,6 +42,7 @@ pub use registry::JobRegistry;
 pub use registry::{SAMPLE_HISTORY, SCREEN_COLS, SCREEN_ROWS};
 pub use rules::{Decision, Disposition, NodePolicy, RuleSet, SeedConfig};
 pub use scope::{Caller, Scope};
+pub use standing::STANDING_FILE;
 pub use stats::{Breach, Limits, Sample, Stats};
 pub use wire::{METHODS, WireError, dispatch};
 

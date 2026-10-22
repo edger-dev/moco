@@ -46,7 +46,11 @@ impl Verdict {
     pub fn permitted(&self) -> bool {
         matches!(
             self,
-            Verdict::Ungoverned | Verdict::SeedAllow | Verdict::ApprovedOnce
+            Verdict::Ungoverned
+                | Verdict::SeedAllow
+                | Verdict::ApprovedOnce
+                | Verdict::StandingAllow
+                | Verdict::ApprovedAlways
         )
     }
 }

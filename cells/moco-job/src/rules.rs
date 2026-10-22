@@ -33,10 +33,10 @@ pub struct SeedConfig {
 
 /// A node's allow/deny rule-set, matched on **exact argv**.
 ///
-/// Owned by the target node. There is deliberately **no method that adds,
-/// removes, or widens a rule** — a requesting agent may evaluate and read, never
-/// write. Standing rules come from the committed seed; the human-gated overlay
-/// writer (the "always" verdicts) is a later slice.
+/// Owned by the target node. There is deliberately **no public method that
+/// adds, removes, or widens a rule** — a requesting agent may evaluate and
+/// read, never write. Rules come from the committed seed, and from the
+/// standing overlay the "always" verdicts write.
 ///
 /// implements: rule-set-target-owned-human-mutated
 /// implements: four-verdicts-exact-argv
@@ -73,6 +73,18 @@ impl RuleSet {
     /// Read the standing deny rules.
     pub fn deny_rules(&self) -> &[Vec<String>] {
         &self.deny
+    }
+
+    /// This rule-set with one more exact-argv rule (none added when it is
+    /// already there). Crate-private: only the standing overlay, written on a
+    /// human's verdict, grows a rule-set.
+    pub(crate) fn with_rule(&self, allow: bool, argv: Vec<String>) -> Self {
+        let mut next = self.clone();
+        let list = if allow { &mut next.allow } else { &mut next.deny };
+        if !list.contains(&argv) {
+            list.push(argv);
+        }
+        next
     }
 
     /// Resolve an argv to its disposition. **Deny beats allow.**
@@ -137,9 +149,8 @@ impl NodePolicy {
 
 /// A human's decision on a pending job.
 ///
-/// v1 carries the *once* verdicts: they transition this job and write no rule.
-/// The "always" verdicts, which append to a node-owned overlay, arrive with the
-/// human-gated overlay writer.
+/// The *once* verdicts transition this job and write no rule; the *always*
+/// verdicts also append an exact-argv rule to the node's standing overlay.
 ///
 /// implements: approval-is-a-job-state
 /// implements: four-verdicts-exact-argv
