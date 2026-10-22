@@ -16,9 +16,7 @@ use moco_job::wire::{
     self, DecideReply, DecideRequest, PendingReply, PendingRequest, PreflightReply,
     PreflightRequest, StartRequest, WaitRequest, WireCaller, WireVerdict,
 };
-use moco_job::{
-    Disposition, JobRegistry, JobStatus, NodePolicy, RuleSet, SeedConfig, Verdict,
-};
+use moco_job::{Disposition, JobRegistry, JobStatus, NodePolicy, RuleSet, SeedConfig, Verdict};
 
 fn root() -> PathBuf {
     std::env::temp_dir()
@@ -146,7 +144,14 @@ fn a_session_cannot_decide() {
 fn allow_always_crosses_the_wire() {
     let reg = governed();
     let id = start(&reg, &["echo", "recurring"]);
-    decide(&reg, &id, WireVerdict::AllowAlways, &[], WireCaller::Console).unwrap();
+    decide(
+        &reg,
+        &id,
+        WireVerdict::AllowAlways,
+        &[],
+        WireCaller::Console,
+    )
+    .unwrap();
     assert_eq!(wait(&reg, &id).verdict, Verdict::ApprovedAlways);
     let again = start(&reg, &["echo", "recurring"]);
     assert_eq!(wait(&reg, &again).verdict, Verdict::StandingAllow);
@@ -199,7 +204,10 @@ fn pending_lists_what_waits_for_a_verdict() {
     assert!(job.left_ms > 0 && job.left_ms <= 5_000, "{}", job.left_ms);
 
     decide(&reg, &id, WireVerdict::DenyOnce, &[], WireCaller::Console).unwrap();
-    assert!(pending(&reg).jobs.is_empty(), "a decided job no longer waits");
+    assert!(
+        pending(&reg).jobs.is_empty(),
+        "a decided job no longer waits"
+    );
 }
 
 /// Preflight crosses the wire and runs nothing: it says what the gate would

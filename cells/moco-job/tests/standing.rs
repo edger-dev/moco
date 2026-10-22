@@ -172,7 +172,9 @@ fn allow_always_never_launders_a_seed_deny() {
         }
     );
     assert!(
-        !reg.standing().allow_rules().contains(&argv(&["echo", "nope"])),
+        !reg.standing()
+            .allow_rules()
+            .contains(&argv(&["echo", "nope"])),
         "no allow rule may be written for a seed-denied argv"
     );
 }
@@ -343,19 +345,37 @@ fn two_registries_on_one_directory_share_their_rules() {
     let a = governed_in(&dir);
     let b = governed_in(&dir);
 
-    let id = a.start(JobRequest::new(["echo", "from-a"], root())).unwrap();
+    let id = a
+        .start(JobRequest::new(["echo", "from-a"], root()))
+        .unwrap();
     a.decide(&id, Decision::DenyAlways).unwrap();
     a.wait(&id).unwrap();
-    let id = b.start(JobRequest::new(["echo", "from-b"], root())).unwrap();
+    let id = b
+        .start(JobRequest::new(["echo", "from-b"], root()))
+        .unwrap();
     b.decide(&id, Decision::allow_always()).unwrap();
     b.wait(&id).unwrap();
 
-    let barred = b.start(JobRequest::new(["echo", "from-a"], root())).unwrap();
+    let barred = b
+        .start(JobRequest::new(["echo", "from-a"], root()))
+        .unwrap();
     assert_eq!(b.wait(&barred).unwrap().verdict, Verdict::StandingDeny);
-    let granted = a.start(JobRequest::new(["echo", "from-b"], root())).unwrap();
+    let granted = a
+        .start(JobRequest::new(["echo", "from-b"], root()))
+        .unwrap();
     assert_eq!(a.wait(&granted).unwrap().verdict, Verdict::StandingAllow);
 
     let reopened = governed_in(&dir);
-    assert!(reopened.standing().deny_rules().contains(&argv(&["echo", "from-a"])));
-    assert!(reopened.standing().allow_rules().contains(&argv(&["echo", "from-b"])));
+    assert!(
+        reopened
+            .standing()
+            .deny_rules()
+            .contains(&argv(&["echo", "from-a"]))
+    );
+    assert!(
+        reopened
+            .standing()
+            .allow_rules()
+            .contains(&argv(&["echo", "from-b"]))
+    );
 }

@@ -81,7 +81,11 @@ impl RuleSet {
     /// human's verdict, grows a rule-set.
     pub(crate) fn with_rule(&self, allow: bool, argv: Vec<String>) -> Self {
         let mut next = self.clone();
-        let list = if allow { &mut next.allow } else { &mut next.deny };
+        let list = if allow {
+            &mut next.allow
+        } else {
+            &mut next.deny
+        };
         if !list.contains(&argv) {
             list.push(argv);
         }

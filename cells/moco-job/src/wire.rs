@@ -22,6 +22,7 @@ use facet::Facet;
 use crate::error::JobError;
 use crate::job::{JobId, JobRequest, JobStatus};
 use crate::registry::JobRegistry;
+use crate::rules::Decision;
 use crate::scope::{Caller, Scope};
 
 /// Who is asking, on the wire.
@@ -608,19 +609,75 @@ pub fn dispatch(
                 .collect();
             write(method, &ListReply { jobs })
         }
+        "decide" => {
+            let req: DecideRequest = read(method, request)?;
+            let edited = (!req.edited_argv.is_empty()).then_some(req.edited_argv);
+            let decision = match req.verdict {
+                WireVerdict::AllowOnce => Decision::AllowOnce {
+                    edited_argv: edited,
+                },
+                WireVerdict::AllowAlways => Decision::AllowAlways {
+                    edited_argv: edited,
+                },
+                WireVerdict::DenyOnce | WireVerdict::DenyAlways if edited.is_some() => {
+                    return Err(WireError::Request {
+                        method: method.to_string(),
+                        detail: "an edited argv goes with an allow verdict, not a deny".into(),
+                    });
+                }
+                WireVerdict::DenyOnce => Decision::DenyOnce,
+                WireVerdict::DenyAlways => Decision::DenyAlways,
+            };
+            registry.decide_as(&JobId(req.id.clone()), decision, &req.caller.resolve())?;
+            write(method, &DecideReply { id: req.id })
+        }
+        "preflight" => {
+            let req: PreflightRequest = read(method, request)?;
+            let out = registry.preflight(&req.argv, std::path::Path::new(&req.cwd));
+            let text = |p: Option<PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
+            write(
+                method,
+                &PreflightReply {
+                    disposition: out.disposition,
+                    program: text(out.program).unwrap_or_default(),
+                    effective_path: out.effective_path,
+                    resolved_cwd: text(out.resolved_cwd).unwrap_or_default(),
+                    cwd_error: out.cwd_error.unwrap_or_default(),
+                },
+            )
+        }
+        "pending" => {
+            let _: PendingRequest = read(method, request)?;
+            let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+            let jobs = registry
+                .pending()
+                .into_iter()
+                .map(|p| PendingJob {
+                    id: p.id.0,
+                    argv: p.argv,
+                    cwd: p.cwd.to_string_lossy().into_owned(),
+                    scope: p.scope,
+                    waited_ms: ms(p.waited),
+                    left_ms: ms(p.left),
+                })
+                .collect();
+            write(method, &PendingReply { jobs })
+        }
         other => Err(WireError::UnknownMethod(other.to_string())),
     }
 }
 
 /// The methods this surface answers, in a stable order.
 ///
-/// `decide` is deliberately absent: approval is the human's write, and putting
-/// it on a remotely-callable surface would advertise the gate on the very
-/// channel the gate exists to constrain.
+/// `decide` is here as `input` is: the human's write, answered for the console
+/// caller only — the engine refuses it for any session.
 ///
 /// implements: intervention-is-the-only-human-write
 pub const METHODS: &[&str] = &[
     "start",
+    "decide",
+    "preflight",
+    "pending",
     "start_named",
     "restart",
     "ensure",

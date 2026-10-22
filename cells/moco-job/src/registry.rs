@@ -687,6 +687,18 @@ fn spawn_child(
         })
 }
 
+/// One job awaiting a verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub id: JobId,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub scope: Scope,
+    pub waited: Duration,
+    /// Until it fails closed; `Duration::MAX` on an ungoverned registry.
+    pub left: Duration,
+}
+
 /// The registry every job lives on: it owns their ids, live output, control
 /// handles, and terminal records. A governed command is an ordinary job on this
 /// registry with a rule-set evaluated before it spawns — that is the whole point
@@ -1710,6 +1722,54 @@ impl JobRegistry {
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+
+    /// The jobs awaiting a verdict, oldest first: what a human needs to answer
+    /// each — its argv, where it runs, its owner, how long it has waited and
+    /// how long is left before it fails closed.
+    ///
+    /// implements: approval-is-a-job-state
+    pub fn pending(&self) -> Vec<PendingApproval> {
+        self.settle_all();
+        let timeout = self.policy.as_ref().map(|p| p.approval_timeout);
+        let inner = self.locked();
+        let mut out: Vec<PendingApproval> = inner
+            .jobs
+            .iter()
+            .filter(|(_, h)| h.status == JobStatus::PendingApproval)
+            .filter_map(|(id, h)| {
+                let request = h.pending.as_ref()?;
+                let waited = h.started.elapsed();
+                let left = timeout.map_or(Duration::MAX, |t| t.saturating_sub(waited));
+                (!left.is_zero()).then(|| PendingApproval {
+                    id: id.clone(),
+                    argv: request.argv.clone(),
+                    cwd: request.cwd.clone(),
+                    scope: h.scope.clone(),
+                    waited,
+                    left,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| b.waited.cmp(&a.waited));
+        out
+    }
+
+    /// [`JobRegistry::decide`] for a caller that says who it is: the console
+    /// answers the gate; a session — even the job's own — is refused, and the
+    /// job stays pending.
+    ///
+    /// implements: intervention-is-the-only-human-write
+    pub fn decide_as(
+        &self,
+        id: &JobId,
+        decision: Decision,
+        caller: &Caller,
+    ) -> Result<(), JobError> {
+        if !matches!(caller, Caller::Console) {
+            return Err(JobError::DecisionRefused { job: id.clone() });
+        }
+        self.decide(id, decision)
     }
 
     /// The directory this registry's durable state lives in.

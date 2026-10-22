@@ -38,7 +38,7 @@ pub use port::{PortRange, PortRequest};
 pub use preflight::Preflight;
 pub use procfs::{Liveness, liveness};
 pub use record::{JobRecord, RecordStore};
-pub use registry::JobRegistry;
+pub use registry::{JobRegistry, PendingApproval};
 pub use registry::{SAMPLE_HISTORY, SCREEN_COLS, SCREEN_ROWS};
 pub use rules::{Decision, Disposition, NodePolicy, RuleSet, SeedConfig};
 pub use scope::{Caller, Scope};

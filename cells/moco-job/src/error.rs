@@ -62,6 +62,9 @@ pub enum JobError {
     EnvUnderGovernance,
     /// Input was sent to a job that cannot take it: why.
     InputRefused { job: JobId, reason: String },
+    /// A verdict from anyone but the human: answering the gate is the
+    /// console's alone.
+    DecisionRefused { job: JobId },
     /// The program could not be spawned. Names the binary **and** the PATH that
     /// was searched, so the fix is obvious rather than a guess.
     Spawn {
@@ -152,6 +155,11 @@ impl fmt::Display for JobError {
             JobError::InputRefused { job, reason } => {
                 write!(f, "job {job} takes no input: {reason}")
             }
+            JobError::DecisionRefused { job } => write!(
+                f,
+                "job {job}: answering the approval gate is the human's intervention; \
+                 only the console may"
+            ),
             JobError::ForeignWorkspace { job, owner, caller } => write!(
                 f,
                 "job {job} is owned by workspace '{owner}', and this caller is \
