@@ -2151,43 +2151,17 @@ impl JobRegistry {
         };
         let approval_timeout = self.policy.as_ref().map(|p| p.approval_timeout);
 
-        // An *always* verdict writes its rule first. A write that fails fails
-        // the decision and leaves the job pending, so the human can still
-        // choose once. No rule is written for an argv a rule already decides —
-        // a standing allow never launders a deny — nor for a decision that
-        // arrived after the approval window.
+        // An *always* verdict writes its rule inside the decision, once its
+        // outcome is known, so a rule never exists without the verdict that
+        // records it. No rule is written for a late decision, an allow never
+        // launders a deny, and a deny is written over an allow (deny beats
+        // allow, so deny-always is how a standing allow is taken back).
+        // Lock order: `inner`, then `standing` — never the reverse.
         // implements: four-verdicts-exact-argv
         let always = matches!(
             decision,
             Decision::AllowAlways { .. } | Decision::DenyAlways
         );
-        if always {
-            let proposed = {
-                let inner = self.locked();
-                let handle = inner
-                    .jobs
-                    .get(id)
-                    .ok_or_else(|| JobError::NotFound(id.clone()))?;
-                let late = approval_timeout.is_some_and(|t| handle.started.elapsed() >= t);
-                match (&handle.status, &handle.pending) {
-                    (JobStatus::PendingApproval, Some(request)) => {
-                        (!late).then(|| request.argv.clone())
-                    }
-                    _ => return Err(JobError::NotPending(id.clone())),
-                }
-            };
-            if let Some(proposed) = proposed {
-                let (allow, argv) = match &decision {
-                    Decision::AllowAlways { edited_argv } => {
-                        (true, edited_argv.clone().unwrap_or(proposed))
-                    }
-                    _ => (false, proposed),
-                };
-                if self.disposition(&argv) == Disposition::NeedsApproval {
-                    self.standing_locked().add(allow, argv)?;
-                }
-            }
-        }
 
         // The whole decision runs under the lock and yields *what to audit*;
         // the write itself happens after the lock is released, below. Doing it
@@ -2238,6 +2212,14 @@ impl JobRegistry {
 
             match decision {
                 Decision::DenyOnce | Decision::DenyAlways => {
+                    if always && self.disposition(&request.argv) != Disposition::Deny {
+                        // A failed write changes nothing: the job is still
+                        // pending, and the human can still choose once.
+                        if let Err(e) = self.standing_locked().add(false, request.argv.clone()) {
+                            handle.pending = Some(request);
+                            return Err(e);
+                        }
+                    }
                     handle.status = JobStatus::Denied {
                         reason: DeniedReason::Decision,
                     };
@@ -2254,6 +2236,7 @@ impl JobRegistry {
                     // An edited argv is the correction back-channel: it, not
                     // the proposal, is what actually runs.
                     let argv = edited_argv.unwrap_or(request.argv);
+                    let grant = always.then(|| argv.clone());
                     // Re-confine immediately before spawning: the cwd was
                     // resolved when the job was proposed, possibly long ago.
                     // This shrinks — but cannot fully close — the window in
@@ -2299,17 +2282,33 @@ impl JobRegistry {
                             handle.status = JobStatus::Running;
                             // The approval is the authority, and the argv that
                             // ran is what the record must name.
-                            handle.verdict = if always {
-                                Verdict::ApprovedAlways
-                            } else {
-                                Verdict::ApprovedOnce
-                            };
+                            handle.verdict = Verdict::ApprovedOnce;
                             handle.argv = argv;
                             handle.resolved_cwd = cwd;
                             // The execution deadline runs from the spawn, not
                             // from the moment the job entered the approval
                             // queue.
                             handle.started = Instant::now();
+                            // The job runs either way; the verdict says
+                            // whether the grant was written.
+                            if let Some(grant) = grant {
+                                let wrote = match self.disposition(&grant) {
+                                    Disposition::NeedsApproval => {
+                                        self.standing_locked().add(true, grant)
+                                    }
+                                    _ => Ok(()),
+                                };
+                                match wrote {
+                                    Ok(()) => handle.verdict = Verdict::ApprovedAlways,
+                                    Err(e) => {
+                                        let _ = persist(store, id, handle);
+                                        return Err(JobError::Seed(format!(
+                                            "approved once: the job runs, but its standing \
+                                             rule could not be written ({e})"
+                                        )));
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             // Never leave the job pending with its decision

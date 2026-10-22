@@ -264,3 +264,98 @@ fn the_seed_is_never_written() {
         Some(vec![argv(&["echo", "ok"])])
     );
 }
+
+/// Every awkward spelling round-trips: booleans, a number, a newline, a
+/// backslash, and the escape marker itself.
+#[test]
+fn awkward_argv_round_trips() {
+    let awkward = ["false", "true", "42", "a\nb", "back\\slash", "\\=true", ""];
+    let dir = state_dir();
+    {
+        let reg = governed_in(&dir);
+        for word in awkward {
+            let id = reg.start(JobRequest::new(["echo", word], root())).unwrap();
+            reg.decide(&id, Decision::DenyAlways).unwrap();
+            reg.wait(&id).unwrap();
+        }
+    }
+    let reg = governed_in(&dir);
+    for word in awkward {
+        assert!(
+            reg.standing().deny_rules().contains(&argv(&["echo", word])),
+            "{word:?} lost; got {:?}",
+            reg.standing().deny_rules()
+        );
+    }
+}
+
+/// An overlay that cannot be decoded fails the registry closed rather than
+/// opening it with its standing denies silently gone.
+#[test]
+fn a_corrupt_overlay_fails_closed() {
+    let dir = state_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("standing-rules.styx"), "allow ((((").unwrap();
+    let opened = JobRegistry::with_policy(policy()).unwrap().with_dir(&dir);
+    assert!(opened.is_err(), "a corrupt overlay must not open");
+}
+
+/// A decision after the approval window writes no rule.
+#[test]
+fn a_late_always_writes_no_rule() {
+    let rules = RuleSet::from_seed(SeedConfig::default());
+    let reg = JobRegistry::with_policy(
+        NodePolicy::new(rules, root()).with_approval_timeout(Duration::from_millis(100)),
+    )
+    .unwrap()
+    .with_dir(state_dir())
+    .unwrap();
+    let id = reg
+        .start(JobRequest::new(["echo", "late"], root()))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    reg.decide(&id, Decision::allow_always()).unwrap();
+    assert_eq!(reg.wait(&id).unwrap().verdict, Verdict::NoApprover);
+    assert!(reg.standing().allow_rules().is_empty());
+}
+
+/// Deny always takes back a standing allow: a pending job whose argv was
+/// allowed meanwhile still gets its deny rule, and deny beats allow.
+#[test]
+fn deny_always_takes_back_a_standing_allow() {
+    let reg = governed_in(&state_dir());
+    let first = reg.start(JobRequest::new(["echo", "x"], root())).unwrap();
+    let second = reg.start(JobRequest::new(["echo", "x"], root())).unwrap();
+    reg.decide(&first, Decision::allow_always()).unwrap();
+    reg.wait(&first).unwrap();
+    reg.decide(&second, Decision::DenyAlways).unwrap();
+    assert_eq!(reg.wait(&second).unwrap().verdict, Verdict::RejectedAlways);
+
+    let third = reg.start(JobRequest::new(["echo", "x"], root())).unwrap();
+    assert_eq!(reg.wait(&third).unwrap().verdict, Verdict::StandingDeny);
+}
+
+/// Two registries on one directory never erase each other's rules, and each
+/// applies the other's.
+#[test]
+fn two_registries_on_one_directory_share_their_rules() {
+    let dir = state_dir();
+    let a = governed_in(&dir);
+    let b = governed_in(&dir);
+
+    let id = a.start(JobRequest::new(["echo", "from-a"], root())).unwrap();
+    a.decide(&id, Decision::DenyAlways).unwrap();
+    a.wait(&id).unwrap();
+    let id = b.start(JobRequest::new(["echo", "from-b"], root())).unwrap();
+    b.decide(&id, Decision::allow_always()).unwrap();
+    b.wait(&id).unwrap();
+
+    let barred = b.start(JobRequest::new(["echo", "from-a"], root())).unwrap();
+    assert_eq!(b.wait(&barred).unwrap().verdict, Verdict::StandingDeny);
+    let granted = a.start(JobRequest::new(["echo", "from-b"], root())).unwrap();
+    assert_eq!(a.wait(&granted).unwrap().verdict, Verdict::StandingAllow);
+
+    let reopened = governed_in(&dir);
+    assert!(reopened.standing().deny_rules().contains(&argv(&["echo", "from-a"])));
+    assert!(reopened.standing().allow_rules().contains(&argv(&["echo", "from-b"])));
+}
