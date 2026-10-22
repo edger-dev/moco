@@ -269,6 +269,80 @@ pub struct JobSummary {
     pub restarts: u64,
 }
 
+/// A human's verdict on a job awaiting approval.
+///
+/// implements: four-verdicts-exact-argv
+#[derive(Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WireVerdict {
+    AllowOnce,
+    AllowAlways,
+    DenyOnce,
+    DenyAlways,
+}
+
+/// Answer the gate for one pending job. The console's alone.
+///
+/// implements: intervention-is-the-only-human-write
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct DecideRequest {
+    pub id: String,
+    pub verdict: WireVerdict,
+    /// A corrected argv to run instead (allow verdicts only); empty for none.
+    #[facet(default)]
+    pub edited_argv: Vec<String>,
+    pub caller: WireCaller,
+}
+
+/// The verdict was recorded.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct DecideReply {
+    pub id: String,
+}
+
+/// What a start of this argv in this directory would meet — read-only.
+///
+/// implements: agent-self-sufficiency
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct PreflightRequest {
+    pub argv: Vec<String>,
+    pub cwd: String,
+}
+
+/// Every problem a start would meet, at once. Empty strings mean none.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct PreflightReply {
+    pub disposition: crate::rules::Disposition,
+    /// Where `argv[0]` resolves on the daemon's PATH; empty when it does not.
+    pub program: String,
+    pub effective_path: String,
+    /// Where the job would run; empty when the cwd was refused.
+    pub resolved_cwd: String,
+    pub cwd_error: String,
+}
+
+/// List the jobs awaiting a verdict.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct PendingRequest {}
+
+/// One job awaiting a verdict: what a human needs to answer it.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct PendingJob {
+    pub id: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub scope: Scope,
+    /// How long it has waited, and how long until it fails closed.
+    pub waited_ms: u64,
+    pub left_ms: u64,
+}
+
+/// The jobs awaiting a verdict, oldest first.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct PendingReply {
+    pub jobs: Vec<PendingJob>,
+}
+
 /// Every job this registry knows about.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct ListReply {

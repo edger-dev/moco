@@ -8,7 +8,8 @@ use crate::error::JobError;
 /// What a rule-set says about one exact argv.
 ///
 /// implements: four-verdicts-exact-argv (the matching half)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Disposition {
     /// A rule permits this exact argv — it may spawn.
     Allow,
