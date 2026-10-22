@@ -1,0 +1,3 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"store","kind":"markdown","id":"df4c96f5f9faf32e06b359984f328ddcf31bdd981778eeb1153d7347fd3d5fca","hash":"df4c96f5f9faf32e06b359984f328ddcf31bdd981778eeb1153d7347fd3d5fca","parents":[],"ts":"2026-10-22T05:21:50.244305587Z","author":"YJ Park","provenance":"start_vouched review","metadata":{"name":"readopted-job-loses-env","status::active":"true"}}
+{"event_kind":"assign","kind":"kin::assign","id":"df4c96f5f9faf32e06b359984f328ddcf31bdd981778eeb1153d7347fd3d5fca","hash":"df4c96f5f9faf32e06b359984f328ddcf31bdd981778eeb1153d7347fd3d5fca","parents":[],"ts":"2026-10-22T05:21:50.244305587Z","author":"YJ Park","provenance":"start_vouched review","metadata":{"kin::target_root":"inbox"}}
