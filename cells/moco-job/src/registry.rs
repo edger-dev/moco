@@ -2013,6 +2013,10 @@ impl JobRegistry {
     /// implements: argv-not-shell
     /// implements: governed-command-is-a-job
     /// implements: approval-is-a-job-state
+    pub fn start_vouched(&self, req: JobRequest) -> Result<JobId, JobError> {
+        self.start(req)
+    }
+
     pub fn start(&self, req: JobRequest) -> Result<JobId, JobError> {
         if req.argv.is_empty() {
             return Err(JobError::EmptyArgv);

@@ -42,6 +42,9 @@ pub enum Verdict {
     /// The session that asked withdrew it while it awaited a verdict: no
     /// human decided anything.
     Withdrawn,
+    /// The hosting daemon composed this start itself, from values it checked
+    /// (`start_vouched`): no rule and no human admitted it.
+    Vouched,
 }
 
 impl Verdict {

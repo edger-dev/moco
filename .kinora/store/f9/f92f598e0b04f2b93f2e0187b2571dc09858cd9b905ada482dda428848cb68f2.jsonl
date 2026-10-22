@@ -1,0 +1,3 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"assign","kind":"kin::assign","id":"3ed852a4019ec6e4b4357d00bd3f2caea0e653eb186ac40d7a58e1621333dd22","hash":"3ed852a4019ec6e4b4357d00bd3f2caea0e653eb186ac40d7a58e1621333dd22","parents":[],"ts":"2026-10-22T05:17:32.07278322Z","author":"YJ Park","provenance":"kudo phase 5","metadata":{"kin::target_root":"specs"}}
+{"event_kind":"store","kind":"markdown","id":"3ed852a4019ec6e4b4357d00bd3f2caea0e653eb186ac40d7a58e1621333dd22","hash":"3ed852a4019ec6e4b4357d00bd3f2caea0e653eb186ac40d7a58e1621333dd22","parents":[],"ts":"2026-10-22T05:17:32.07278322Z","author":"YJ Park","provenance":"kudo phase 5","metadata":{"doc::kind":"spec","name":"a-hosting-daemon-may-vouch-for-a-start"}}
