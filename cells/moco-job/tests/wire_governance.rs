@@ -426,3 +426,43 @@ fn a_pending_job_is_denied_across_a_restart() {
         }
     );
 }
+
+#[allow(
+    clippy::expect_used,
+    reason = "test helper: a failure is a broken harness"
+)]
+fn listed(reg: &JobRegistry, id: &str) -> wire::JobSummary {
+    let listing: wire::ListReply =
+        wire::decode(&wire::dispatch(reg, "list", b"{}").expect("list")).expect("decode");
+    listing
+        .jobs
+        .into_iter()
+        .find(|j| j.id == id)
+        .expect("the job is listed")
+}
+
+/// The listing says what each job runs: argv, directory, verdict and how long
+/// its phase has lasted — one call for a node's view, not one per job.
+///
+/// implements: a-job-listing-says-what-each-job-runs
+#[test]
+fn a_listing_says_what_each_job_runs() {
+    let reg = governed();
+    let allowed = start(&reg, &["echo", "ok"]);
+    let waiting = start(&reg, &["echo", "unlisted"]);
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let ran = listed(&reg, &allowed);
+    assert_eq!(ran.argv, argv(&["echo", "ok"]));
+    assert_eq!(ran.verdict, Verdict::SeedAllow);
+    assert!(!ran.cwd.is_empty(), "the directory is said");
+
+    let pending = listed(&reg, &waiting);
+    assert_eq!(pending.status, JobStatus::PendingApproval);
+    assert_eq!(pending.argv, argv(&["echo", "unlisted"]));
+    assert!(
+        pending.phase_s >= 1,
+        "a job waiting a second says so, got {}",
+        pending.phase_s
+    );
+}
