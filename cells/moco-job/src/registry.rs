@@ -2013,11 +2013,21 @@ impl JobRegistry {
     /// implements: argv-not-shell
     /// implements: governed-command-is-a-job
     /// implements: approval-is-a-job-state
-    pub fn start_vouched(&self, req: JobRequest) -> Result<JobId, JobError> {
-        self.start(req)
+    pub fn start(&self, req: JobRequest) -> Result<JobId, JobError> {
+        self.start_gated(req, false)
     }
 
-    pub fn start(&self, req: JobRequest) -> Result<JobId, JobError> {
+    /// Start what the **hosting daemon composed itself**, from values it
+    /// checked: no rule gate and no environment refusal, still confined to the
+    /// allowed root, audited as [`Verdict::Vouched`]. In-process only — it is
+    /// never on the job connector, so no remote caller can reach it.
+    ///
+    /// implements: a-hosting-daemon-may-vouch-for-a-start
+    pub fn start_vouched(&self, req: JobRequest) -> Result<JobId, JobError> {
+        self.start_gated(req, true)
+    }
+
+    fn start_gated(&self, req: JobRequest, vouched: bool) -> Result<JobId, JobError> {
         if req.argv.is_empty() {
             return Err(JobError::EmptyArgv);
         }
@@ -2025,7 +2035,7 @@ impl JobRegistry {
         // allowed argv runs (PATH, LD_PRELOAD, …). Fail closed until the
         // rule-set can speak about them.
         // implements: adhoc-start-carries-env-and-view
-        if self.policy.is_some() && !req.env.is_empty() {
+        if self.policy.is_some() && !vouched && !req.env.is_empty() {
             return Err(JobError::EnvUnderGovernance);
         }
 
@@ -2054,7 +2064,11 @@ impl JobRegistry {
             .scope
             .clone()
             .unwrap_or_else(|| Scope::resolve(&req.cwd));
-        let (disposition, gate_verdict) = self.gate(&req.argv);
+        let (disposition, gate_verdict) = if vouched {
+            (Disposition::Allow, Verdict::Vouched)
+        } else {
+            self.gate(&req.argv)
+        };
 
         let mut inner = self.locked();
         // Minting claims the id on disk, so two daemons sharing this directory

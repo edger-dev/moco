@@ -57,6 +57,7 @@ impl Verdict {
                 | Verdict::ApprovedOnce
                 | Verdict::StandingAllow
                 | Verdict::ApprovedAlways
+                | Verdict::Vouched
         )
     }
 }
