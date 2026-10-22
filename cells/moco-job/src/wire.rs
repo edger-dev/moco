@@ -268,6 +268,18 @@ pub struct JobSummary {
     pub external: bool,
     /// How many times the supervisor has brought it back.
     pub restarts: u64,
+    /// Exactly the argv it ran, or would run — the corrected one once an
+    /// approval edited it.
+    ///
+    /// implements: a-job-listing-says-what-each-job-runs
+    pub argv: Vec<String>,
+    /// The directory it runs in.
+    pub cwd: String,
+    /// The authority it resolved under, so far.
+    pub verdict: crate::Verdict,
+    /// Seconds its current phase has lasted: waiting for a verdict, or since
+    /// it was spawned.
+    pub phase_s: u64,
 }
 
 /// A human's verdict on a job awaiting approval.
@@ -607,6 +619,15 @@ pub fn dispatch(
                     port: registry.port_of(&id).unwrap_or(0),
                     external: registry.is_external(&id),
                     restarts: registry.restarts_of(&id),
+                    argv: registry.argv_of(&id).unwrap_or_default(),
+                    cwd: registry
+                        .cwd_of(&id)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    verdict: registry
+                        .verdict_of(&id)
+                        .unwrap_or(crate::Verdict::Ungoverned),
+                    phase_s: registry.phase_of(&id).map_or(0, |d| d.as_secs()),
                     id: id.0,
                     status,
                 })

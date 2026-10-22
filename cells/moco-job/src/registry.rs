@@ -1802,6 +1802,12 @@ impl JobRegistry {
         out
     }
 
+    /// How long a job's current phase has lasted: waiting for a verdict, or
+    /// since it was spawned.
+    pub fn phase_of(&self, id: &JobId) -> Option<Duration> {
+        self.locked().jobs.get(id).map(|h| h.started.elapsed())
+    }
+
     /// The authority a job resolved under, so far.
     pub fn verdict_of(&self, id: &JobId) -> Option<Verdict> {
         self.locked().jobs.get(id).map(|h| h.verdict)
