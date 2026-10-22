@@ -39,6 +39,9 @@ pub enum Verdict {
     ApprovedAlways,
     /// A human rejected this instance and denied its exact argv from now on.
     RejectedAlways,
+    /// The session that asked withdrew it while it awaited a verdict: no
+    /// human decided anything.
+    Withdrawn,
 }
 
 impl Verdict {

@@ -295,10 +295,14 @@ pub struct DecideRequest {
     pub caller: WireCaller,
 }
 
-/// The verdict was recorded.
+/// What the verdict led to. A verdict can be accepted and still run
+/// nothing — one past the approval window, or an edit a deny rule forbids —
+/// so the reply says where the job ended up, not merely that it was heard.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct DecideReply {
     pub id: String,
+    pub status: JobStatus,
+    pub verdict: crate::audit::Verdict,
 }
 
 /// What a start of this argv in this directory would meet — read-only.
@@ -628,8 +632,20 @@ pub fn dispatch(
                 WireVerdict::DenyOnce => Decision::DenyOnce,
                 WireVerdict::DenyAlways => Decision::DenyAlways,
             };
-            registry.decide_as(&JobId(req.id.clone()), decision, &req.caller.resolve())?;
-            write(method, &DecideReply { id: req.id })
+            let id = JobId(req.id.clone());
+            registry.decide_as(&id, decision, &req.caller.resolve())?;
+            let status = registry.tail(&id, u64::MAX)?.status;
+            let verdict = registry
+                .verdict_of(&id)
+                .ok_or_else(|| JobError::NotFound(id.clone()))?;
+            write(
+                method,
+                &DecideReply {
+                    id: req.id,
+                    status,
+                    verdict,
+                },
+            )
         }
         "preflight" => {
             let req: PreflightRequest = read(method, request)?;
@@ -675,9 +691,6 @@ pub fn dispatch(
 /// implements: intervention-is-the-only-human-write
 pub const METHODS: &[&str] = &[
     "start",
-    "decide",
-    "preflight",
-    "pending",
     "start_named",
     "restart",
     "ensure",
@@ -690,6 +703,9 @@ pub const METHODS: &[&str] = &[
     "kill",
     "input",
     "list",
+    "decide",
+    "preflight",
+    "pending",
 ];
 
 // `adopt` is deliberately **not** here. Handing the supervisor an arbitrary pid

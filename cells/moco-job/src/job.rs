@@ -52,6 +52,8 @@ pub enum DeniedReason {
     NoApprover,
     /// Its cwd did not resolve inside the node's allowed root.
     CwdEscape,
+    /// The session that asked withdrew it before any verdict.
+    Withdrawn,
 }
 
 /// The lifecycle state of a job.

@@ -16,7 +16,9 @@ use moco_job::wire::{
     self, DecideReply, DecideRequest, PendingReply, PendingRequest, PreflightReply,
     PreflightRequest, StartRequest, WaitRequest, WireCaller, WireVerdict,
 };
-use moco_job::{Disposition, JobRegistry, JobStatus, NodePolicy, RuleSet, SeedConfig, Verdict};
+use moco_job::{
+    DeniedReason, Disposition, JobRegistry, JobStatus, NodePolicy, RuleSet, SeedConfig, Verdict,
+};
 
 fn root() -> PathBuf {
     std::env::temp_dir()
@@ -133,7 +135,15 @@ fn a_session_cannot_decide() {
             cwd: root().to_string_lossy().into_owned(),
         },
     );
-    assert!(refused.is_err(), "a session's verdict must be refused");
+    assert!(
+        matches!(
+            refused,
+            Err(wire::WireError::Job(
+                moco_job::JobError::DecisionRefused { .. }
+            ))
+        ),
+        "a session's verdict must be refused as such: {refused:?}"
+    );
     assert_eq!(pending(&reg).jobs.len(), 1, "the job must still be pending");
     decide(&reg, &id, WireVerdict::DenyOnce, &[], WireCaller::Console).unwrap();
 }
@@ -239,4 +249,180 @@ fn the_gate_methods_are_listed() {
     for method in ["decide", "preflight", "pending"] {
         assert!(wire::METHODS.contains(&method), "{method} missing");
     }
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "test helper: a failure is a broken harness"
+)]
+fn governed_with_timeout(timeout: Duration) -> JobRegistry {
+    let rules = RuleSet::from_seed(SeedConfig {
+        allow: vec![],
+        deny: vec![argv(&["echo", "nope"])],
+    });
+    JobRegistry::with_policy(NodePolicy::new(rules, root()).with_approval_timeout(timeout))
+        .expect("registry")
+}
+
+/// A verdict past the window is heard and runs nothing — and the reply says
+/// so, rather than reading as an approval.
+#[test]
+fn a_late_verdict_says_it_ran_nothing() {
+    let reg = governed_with_timeout(Duration::from_millis(100));
+    let id = start(&reg, &["echo", "late"]);
+    std::thread::sleep(Duration::from_millis(200));
+    let reply = decide(&reg, &id, WireVerdict::AllowOnce, &[], WireCaller::Console).unwrap();
+    assert_eq!(
+        reply.status,
+        JobStatus::Denied {
+            reason: DeniedReason::NoApprover
+        }
+    );
+    assert_eq!(reply.verdict, Verdict::NoApprover);
+}
+
+/// An edited allow a deny rule forbids is denied, and the reply says so.
+#[test]
+fn an_edit_into_a_deny_says_it_was_denied() {
+    let reg = governed();
+    let id = start(&reg, &["echo", "unlisted"]);
+    let reply = decide(
+        &reg,
+        &id,
+        WireVerdict::AllowOnce,
+        &["echo", "nope"],
+        WireCaller::Console,
+    )
+    .unwrap();
+    assert_eq!(
+        reply.status,
+        JobStatus::Denied {
+            reason: DeniedReason::Rule
+        }
+    );
+    assert_eq!(reply.verdict, Verdict::SeedDeny);
+}
+
+/// An approval's reply says the job runs, under which verdict.
+#[test]
+fn an_approval_reply_names_its_verdict() {
+    let reg = governed();
+    let id = start(&reg, &["echo", "unlisted"]);
+    let reply = decide(&reg, &id, WireVerdict::AllowOnce, &[], WireCaller::Console).unwrap();
+    assert_eq!(reply.verdict, Verdict::ApprovedOnce);
+    assert!(
+        !matches!(
+            reply.status,
+            JobStatus::Denied { .. } | JobStatus::PendingApproval
+        ),
+        "{:?}",
+        reply.status
+    );
+}
+
+/// A deny with an edited argv is malformed, refused before the engine.
+#[test]
+fn a_deny_with_an_edit_is_refused() {
+    let reg = governed();
+    let id = start(&reg, &["echo", "unlisted"]);
+    let refused = decide(
+        &reg,
+        &id,
+        WireVerdict::DenyOnce,
+        &["echo", "x"],
+        WireCaller::Console,
+    );
+    assert!(
+        matches!(refused, Err(wire::WireError::Request { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(pending(&reg).jobs.len(), 1);
+}
+
+/// A decide written without the optional edit still decodes.
+#[test]
+fn a_decide_without_an_edit_decodes() {
+    let reg = governed();
+    let id = start(&reg, &["echo", "unlisted"]);
+    let bare = format!("{{id \"{id}\", verdict @DenyOnce, caller @Console}}");
+    let reply = wire::dispatch(&reg, "decide", bare.as_bytes()).expect("a bare decide");
+    let reply: DecideReply = wire::decode(&reply).unwrap();
+    assert_eq!(reply.verdict, Verdict::RejectedOnce);
+}
+
+/// A job past its window leaves the list — denied, not merely hidden — and
+/// the list is oldest first.
+#[test]
+fn pending_is_oldest_first_and_drops_the_expired() {
+    let reg = governed_with_timeout(Duration::from_millis(400));
+    let old = start(&reg, &["echo", "old"]);
+    std::thread::sleep(Duration::from_millis(50));
+    let new = start(&reg, &["echo", "new"]);
+    let ids: Vec<String> = pending(&reg).jobs.into_iter().map(|j| j.id).collect();
+    assert_eq!(ids, vec![old.clone(), new.clone()]);
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(pending(&reg).jobs.is_empty());
+    assert_eq!(
+        reg.tail(&moco_job::JobId(old), 0).unwrap().status,
+        JobStatus::Denied {
+            reason: DeniedReason::NoApprover
+        }
+    );
+}
+
+/// Preflight names a cwd outside the allowed root.
+#[test]
+fn preflight_names_a_refused_cwd() {
+    let reg = JobRegistry::with_policy(NodePolicy::new(
+        RuleSet::from_seed(SeedConfig::default()),
+        root().join("moco-confined-nowhere"),
+    ))
+    .unwrap();
+    let request = wire::encode(&PreflightRequest {
+        argv: argv(&["echo", "x"]),
+        cwd: "/".into(),
+    })
+    .unwrap();
+    let reply: PreflightReply =
+        wire::decode(&wire::dispatch(&reg, "preflight", &request).unwrap()).unwrap();
+    assert!(reply.resolved_cwd.is_empty());
+    assert!(!reply.cwd_error.is_empty());
+}
+
+/// A session withdrawing its own pending job is not a human's rejection.
+#[test]
+fn a_session_withdrawing_is_not_a_human_verdict() {
+    let reg = governed();
+    let id = start(&reg, &["echo", "unlisted"]);
+    let session = moco_job::Caller::Scoped(moco_job::Scope::resolve(root()));
+    reg.kill(&moco_job::JobId(id.clone()), &session).unwrap();
+    let outcome = wait(&reg, &id);
+    assert_eq!(
+        outcome.status,
+        JobStatus::Denied {
+            reason: DeniedReason::Withdrawn
+        }
+    );
+    assert_eq!(outcome.verdict, Verdict::Withdrawn);
+}
+
+/// A job pending when the daemon stopped is denied when it comes back: its
+/// proposal is gone, so no verdict could run it.
+#[test]
+fn a_pending_job_is_denied_across_a_restart() {
+    let dir = std::env::temp_dir().join(format!("moco-pending-restart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let id = {
+        let reg = governed().with_dir(&dir).unwrap();
+        start(&reg, &["echo", "unlisted"])
+    };
+    let reg = governed().with_dir(&dir).unwrap();
+    assert!(pending(&reg).jobs.is_empty());
+    assert_eq!(
+        reg.tail(&moco_job::JobId(id), 0).unwrap().status,
+        JobStatus::Denied {
+            reason: DeniedReason::NoApprover
+        }
+    );
 }

@@ -806,6 +806,7 @@ impl JobRegistry {
         // barred before the restart still holds.
         let standing = Standing::load(store.dir())?;
         let mut jobs = HashMap::new();
+        let mut expired = Vec::new();
 
         for record in store.all()? {
             let id = JobId(record.id.clone());
@@ -827,6 +828,14 @@ impl JobRegistry {
                     // Gone, pid reused, or unprobeable: either way we cannot
                     // claim it is running and cannot know how it ended.
                     Liveness::Dead | Liveness::Unsupported => JobStatus::OutcomeUnknown,
+                }
+            } else if record.status == JobStatus::PendingApproval {
+                // Its proposal did not survive the restart, so no verdict can
+                // run it: deny it now, as the fail-closed rule says, rather
+                // than leave a job no list shows and no verdict can reach.
+                expired.push(id.clone());
+                JobStatus::Denied {
+                    reason: DeniedReason::NoApprover,
                 }
             } else {
                 record.status.clone()
@@ -891,6 +900,24 @@ impl JobRegistry {
         // `Drop`, so it cannot be moved out of.
         self.inner = Mutex::new(inner);
         self.standing = Mutex::new(standing);
+
+        // Each one failed closed above is an attempt, and every attempt is
+        // history — written to the sink configured by now (set it first).
+        for id in expired {
+            let claimed = {
+                let mut inner = self.locked();
+                let Inner { jobs, store } = &mut *inner;
+                jobs.get_mut(&id).and_then(|handle| {
+                    handle.verdict = Verdict::NoApprover;
+                    let claimed = self.claim(&id, handle);
+                    let _ = persist(store, &id, handle);
+                    claimed
+                })
+            };
+            if let Some(record) = claimed {
+                let _ = self.flush(&id, record);
+            }
+        }
         Ok(self)
     }
 
@@ -1730,29 +1757,54 @@ impl JobRegistry {
     ///
     /// implements: approval-is-a-job-state
     pub fn pending(&self) -> Vec<PendingApproval> {
-        self.settle_all();
         let timeout = self.policy.as_ref().map(|p| p.approval_timeout);
-        let inner = self.locked();
-        let mut out: Vec<PendingApproval> = inner
-            .jobs
-            .iter()
-            .filter(|(_, h)| h.status == JobStatus::PendingApproval)
-            .filter_map(|(id, h)| {
-                let request = h.pending.as_ref()?;
+        let mut out = Vec::new();
+        let mut claimed = Vec::new();
+        {
+            let mut inner = self.locked();
+            let Inner { jobs, store } = &mut *inner;
+            for (id, h) in jobs.iter_mut() {
+                if h.status != JobStatus::PendingApproval {
+                    continue;
+                }
                 let waited = h.started.elapsed();
                 let left = timeout.map_or(Duration::MAX, |t| t.saturating_sub(waited));
-                (!left.is_zero()).then(|| PendingApproval {
-                    id: id.clone(),
-                    argv: request.argv.clone(),
-                    cwd: request.cwd.clone(),
-                    scope: h.scope.clone(),
-                    waited,
-                    left,
-                })
-            })
-            .collect();
+                match (&h.pending, left.is_zero()) {
+                    (Some(request), false) => out.push(PendingApproval {
+                        id: id.clone(),
+                        argv: request.argv.clone(),
+                        cwd: request.cwd.clone(),
+                        scope: h.scope.clone(),
+                        waited,
+                        left,
+                    }),
+                    // Past its window, or with nothing left to spawn: it is
+                    // denied now, as the fail-closed rule says, not merely
+                    // left out of the list.
+                    _ => {
+                        h.status = JobStatus::Denied {
+                            reason: DeniedReason::NoApprover,
+                        };
+                        h.verdict = Verdict::NoApprover;
+                        h.pending = None;
+                        if let Some(record) = self.claim(id, h) {
+                            claimed.push((id.clone(), record));
+                        }
+                        let _ = persist(store, id, h);
+                    }
+                }
+            }
+        }
+        for (id, record) in claimed {
+            let _ = self.flush(&id, record);
+        }
         out.sort_by(|a, b| b.waited.cmp(&a.waited));
         out
+    }
+
+    /// The authority a job resolved under, so far.
+    pub fn verdict_of(&self, id: &JobId) -> Option<Verdict> {
+        self.locked().jobs.get(id).map(|h| h.verdict)
     }
 
     /// [`JobRegistry::decide`] for a caller that says who it is: the console
@@ -2798,10 +2850,22 @@ impl JobRegistry {
             }
 
             if handle.status == JobStatus::PendingApproval {
+                // Only the console's kill is a human's rejection; a session
+                // withdrawing its own request decided nothing, and the audit
+                // must not say a human did.
+                let human = matches!(caller, Caller::Console);
                 handle.status = JobStatus::Denied {
-                    reason: DeniedReason::Decision,
+                    reason: if human {
+                        DeniedReason::Decision
+                    } else {
+                        DeniedReason::Withdrawn
+                    },
                 };
-                handle.verdict = Verdict::RejectedOnce;
+                handle.verdict = if human {
+                    Verdict::RejectedOnce
+                } else {
+                    Verdict::Withdrawn
+                };
                 handle.pending = None;
                 let claimed = self.claim(id, handle);
                 let _ = persist(store, id, handle);
