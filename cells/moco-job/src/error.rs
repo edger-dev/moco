@@ -76,6 +76,10 @@ pub enum JobError {
     NotFound(JobId),
     /// The job's cwd does not resolve inside the node's allowed root.
     CwdEscape { cwd: String, root: String },
+    /// A vouched start asked for something only a declaration may have: a
+    /// name or a restart policy. The daemon that composed the job owns its
+    /// respawn; the engine would rebuild it through the gate without its env.
+    VouchedDeclaration,
     /// The job's cwd is not valid UTF-8, so an audit record could not name it
     /// faithfully. Rejected up front rather than recorded inaccurately.
     CwdNotUtf8 { cwd: String },
@@ -178,6 +182,11 @@ impl fmt::Display for JobError {
                 )
             }
             JobError::NotFound(id) => write!(f, "no such job: {id}"),
+            JobError::VouchedDeclaration => write!(
+                f,
+                "a vouched start carries no name and no restart policy: the daemon that \
+                 composed it owns its respawn"
+            ),
             JobError::CwdEscape { cwd, root } => {
                 write!(
                     f,

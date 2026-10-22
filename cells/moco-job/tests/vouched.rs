@@ -64,15 +64,21 @@ fn the_gated_start_still_refuses_an_environment() {
 /// Vouching skips the gate, not the confinement.
 #[test]
 fn a_vouched_start_is_still_confined() {
+    let confined = root().join("moco-vouched-confined");
+    std::fs::create_dir_all(&confined).unwrap();
     let reg = JobRegistry::with_policy(NodePolicy::new(
         RuleSet::from_seed(SeedConfig::default()),
-        root().join("moco-vouched-confined-nowhere"),
+        &confined,
     ))
     .unwrap();
     assert!(
-        reg.start_vouched(JobRequest::new(["echo", "x"], "/"))
-            .is_err()
+        reg.start_vouched(JobRequest::new(["echo", "x"], &confined))
+            .is_ok()
     );
+    assert!(matches!(
+        reg.start_vouched(JobRequest::new(["echo", "x"], "/")),
+        Err(JobError::CwdEscape { .. })
+    ));
 }
 
 /// No remote caller can vouch: it is not on the connector.
@@ -83,5 +89,47 @@ fn vouching_is_not_on_the_wire() {
     assert!(matches!(
         wire::dispatch(&reg, "start_vouched", b"{}"),
         Err(wire::WireError::UnknownMethod(_))
+    ));
+}
+
+/// The wire's own start stays gated: an environment is still refused there.
+#[test]
+fn the_wire_start_still_refuses_an_environment() {
+    let reg = governed();
+    let request = wire::encode(&wire::StartRequest {
+        argv: vec!["echo".into(), "x".into()],
+        cwd: root().to_string_lossy().into_owned(),
+        deadline_ms: 0,
+        caller: wire::WireCaller::Console,
+        env: vec![wire::EnvVar {
+            name: "KUDO_PROBE".into(),
+            value: "x".into(),
+        }],
+        human_view: moco_job::lens::HumanView::Logs,
+    })
+    .unwrap();
+    assert!(matches!(
+        wire::dispatch(&reg, "start", &request),
+        Err(wire::WireError::Job(JobError::EnvUnderGovernance))
+    ));
+}
+
+/// A vouched start may not ask for a name or a restart policy: the engine's
+/// respawn would rebuild it through the gate, without its environment.
+#[test]
+fn a_vouched_start_carries_no_declaration() {
+    let reg = governed();
+    let named = JobRequest::new(["echo", "x"], root()).named("pane");
+    assert!(matches!(
+        reg.start_vouched(named),
+        Err(JobError::VouchedDeclaration)
+    ));
+    let restarting = JobRequest::new(["echo", "x"], root()).with_lifecycle(
+        moco_job::Lifetime::default(),
+        moco_job::RestartPolicy::Always,
+    );
+    assert!(matches!(
+        reg.start_vouched(restarting),
+        Err(JobError::VouchedDeclaration)
     ));
 }

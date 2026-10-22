@@ -2023,7 +2023,14 @@ impl JobRegistry {
     /// never on the job connector, so no remote caller can reach it.
     ///
     /// implements: a-hosting-daemon-may-vouch-for-a-start
+    ///
+    /// It carries no name and no restart policy: nothing records that a job
+    /// was vouched, and the engine's own respawn would rebuild it through the
+    /// gate without its environment — the daemon that composed it respawns it.
     pub fn start_vouched(&self, req: JobRequest) -> Result<JobId, JobError> {
+        if req.name.is_some() || req.restart != RestartPolicy::Never {
+            return Err(JobError::VouchedDeclaration);
+        }
         self.start_gated(req, true)
     }
 
