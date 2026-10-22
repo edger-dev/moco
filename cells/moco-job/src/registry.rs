@@ -1712,6 +1712,15 @@ impl JobRegistry {
         &self.audit
     }
 
+    /// The standing rules the *always* verdicts wrote, for read-only
+    /// introspection: seeing what a human already granted is not the power
+    /// to grant.
+    ///
+    /// implements: agent-self-sufficiency
+    pub fn standing(&self) -> crate::rules::RuleSet {
+        crate::rules::RuleSet::default()
+    }
+
     /// The node's governance, for read-only introspection. The agent may see
     /// what a human already granted; that is not the power to grant.
     ///
@@ -2103,6 +2112,9 @@ impl JobRegistry {
         let edited_disposition = match &decision {
             Decision::AllowOnce {
                 edited_argv: Some(argv),
+            }
+            | Decision::AllowAlways {
+                edited_argv: Some(argv),
             } => Some(self.disposition(argv)),
             _ => None,
         };
@@ -2156,7 +2168,7 @@ impl JobRegistry {
                 .ok_or_else(|| JobError::NotPending(id.clone()))?;
 
             match decision {
-                Decision::DenyOnce => {
+                Decision::DenyOnce | Decision::DenyAlways => {
                     handle.status = JobStatus::Denied {
                         reason: DeniedReason::Decision,
                     };
@@ -2165,7 +2177,7 @@ impl JobRegistry {
                     let _ = persist(store, id, handle);
                     return Ok(());
                 }
-                Decision::AllowOnce { edited_argv } => {
+                Decision::AllowOnce { edited_argv } | Decision::AllowAlways { edited_argv } => {
                     // An edited argv is the correction back-channel: it, not
                     // the proposal, is what actually runs.
                     let argv = edited_argv.unwrap_or(request.argv);

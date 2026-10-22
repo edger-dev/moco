@@ -30,6 +30,15 @@ pub enum Verdict {
     RejectedOnce,
     /// Nobody decided within the approval window — the fail-closed default.
     NoApprover,
+    /// A standing allow rule (written by an earlier *allow always*) permitted
+    /// this exact argv.
+    StandingAllow,
+    /// A standing deny rule (written by an earlier *deny always*) forbade it.
+    StandingDeny,
+    /// A human approved this instance and allowed its exact argv from now on.
+    ApprovedAlways,
+    /// A human rejected this instance and denied its exact argv from now on.
+    RejectedAlways,
 }
 
 impl Verdict {

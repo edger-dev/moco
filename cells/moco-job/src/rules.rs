@@ -150,12 +150,33 @@ pub enum Decision {
     AllowOnce { edited_argv: Option<Vec<String>> },
     /// Reject this instance.
     DenyOnce,
+    /// Run this instance and append an allow rule for the exact argv that runs
+    /// (the corrected one, when edited) to the node's standing overlay.
+    AllowAlways { edited_argv: Option<Vec<String>> },
+    /// Reject this instance and append a deny rule for its exact argv.
+    DenyAlways,
 }
 
 impl Decision {
     /// Approve without editing the argv.
     pub fn allow() -> Self {
         Decision::AllowOnce { edited_argv: None }
+    }
+
+    /// Approve, and allow this exact argv from now on.
+    pub fn allow_always() -> Self {
+        Decision::AllowAlways { edited_argv: None }
+    }
+
+    /// Approve a corrected argv, and allow that exact argv from now on.
+    pub fn allow_always_edited<I, S>(argv: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Decision::AllowAlways {
+            edited_argv: Some(argv.into_iter().map(Into::into).collect()),
+        }
     }
 
     /// Approve, replacing the proposed argv with a corrected one.
