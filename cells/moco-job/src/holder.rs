@@ -45,6 +45,11 @@ pub struct HolderPaths {
     /// A FIFO the holder reads and copies to the pty: how input reaches a
     /// held job, with no socket and no listener to be present.
     pub input: PathBuf,
+    /// The job's exit code, written when it ends: how a daemon that was not
+    /// there to reap it still learns how it ended.
+    ///
+    /// implements: 0119d16e256891de4a71a14418f59c33419207f49792e58001639f8cbef567a6@d7ba7c887089648434bc819ad57473bb930242c27396d150b11617388bb85da0
+    pub exit: PathBuf,
 }
 
 impl HolderPaths {
@@ -56,6 +61,7 @@ impl HolderPaths {
             screen: capture.with_extension("screen"),
             job_pid: capture.with_extension("jobpid"),
             input: capture.with_extension("input"),
+            exit: capture.with_extension("exit"),
             capture,
         }
     }
