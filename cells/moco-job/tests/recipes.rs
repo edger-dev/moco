@@ -294,3 +294,72 @@ fn recipes_cross_the_wire() {
     let decoded: StartNamedRequest = wire::decode(older.as_bytes()).unwrap();
     assert!(!decoded.node_recipe);
 }
+
+/// A restart keeps the job's owner: the console restarting a session's
+/// recipe job leaves it the session's, so the session can still stop it.
+#[test]
+fn a_restart_keeps_the_recipe_jobs_owner() {
+    let (reg, _d) = node(
+        "owner",
+        r#"proc ({name nap, argv (sleep 30), cwd "{cwd}"})"#,
+    );
+    let (caller, ws) = session();
+    let first = reg.start_recipe("nap", &caller).unwrap();
+    let second = reg.restart(&first, &Caller::Console).unwrap();
+    assert_eq!(reg.scope_of(&second), Some(Scope::resolve(&ws)));
+    reg.kill(&second, &caller)
+        .expect("still the session's to stop");
+}
+
+/// The `recipes` method is advertised with the others.
+#[test]
+fn recipes_is_an_advertised_method() {
+    assert!(wire::METHODS.contains(&"recipes"));
+}
+
+/// A workspace may not declare a name in the recipes' namespace: a restart
+/// would otherwise run the node's recipe in its place.
+#[test]
+fn a_workspace_name_may_not_claim_the_recipe_prefix() {
+    let ws = dir("claims");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::write(
+        ws.join(MANIFEST_FILE),
+        r#"proc ({name "node:nap", argv (echo hi)})"#,
+    )
+    .unwrap();
+    let err = moco_job::manifest::Manifest::load(&ws)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("node:nap") && err.contains("node:"), "{err}");
+}
+
+/// A governed node confines a recipe's directory as it does any start's.
+#[test]
+fn a_recipe_outside_the_allowed_root_is_refused() {
+    let d = dir("confined");
+    let outside = dir("outside");
+    std::fs::write(
+        d.join(MANIFEST_FILE),
+        format!(
+            r#"proc ({{name ok, argv (echo ok), cwd "{}"}})"#,
+            outside.display()
+        ),
+    )
+    .unwrap();
+    let rules = RuleSet::from_seed(SeedConfig {
+        allow: vec![argv(&["echo", "ok"])],
+        deny: vec![],
+    });
+    let reg = JobRegistry::with_policy(NodePolicy::new(rules, &d))
+        .unwrap()
+        .with_dir(&d)
+        .unwrap()
+        .with_node("pc");
+    let (caller, _) = session();
+    let refused = match reg.start_recipe("ok", &caller) {
+        Err(_) => true,
+        Ok(id) => matches!(settled(&reg, &id), JobStatus::Denied { .. }),
+    };
+    assert!(refused, "a cwd outside the allowed root is refused");
+}

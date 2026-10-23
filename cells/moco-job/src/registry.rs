@@ -220,16 +220,16 @@ fn signal_group(pid: u32, pid_start: u64, signal: nix::sys::signal::Signal) -> b
     signal_pid(target, signal).is_ok()
 }
 
-/// Build a job request from a manifest entry.
-///
-/// Shared by workspace `start_named` and node `boot`: the two differ only in
-/// which manifest was read and which scope owns the result, and a second copy
-/// of this would be a place for the two to quietly diverge.
 /// The name a recipe job runs under: apart from any workspace declaration.
 ///
 /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
 pub const RECIPE_PREFIX: &str = "node:";
 
+/// Build a job request from a manifest entry.
+///
+/// Shared by workspace `start_named`, node `boot` and recipes: they differ only in
+/// which manifest was read and which scope owns the result, and a second copy
+/// of this would be a place for the two to quietly diverge.
 fn request_from(
     entry: &crate::manifest::ProcEntry,
     cwd: PathBuf,
@@ -1081,6 +1081,17 @@ impl JobRegistry {
     ///
     /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
     pub fn start_recipe(&self, name: &str, caller: &Caller) -> Result<JobId, JobError> {
+        // Owned by the caller, so the caller may stop it; the console's start
+        // is the node's own.
+        let scope = match caller {
+            Caller::Scoped(scope) => scope.clone(),
+            Caller::Console => Scope::System,
+        };
+        self.start_recipe_for(name, &scope)
+    }
+
+    /// Start the node's recipe `name`, owned by `scope`.
+    fn start_recipe_for(&self, name: &str, scope: &Scope) -> Result<JobId, JobError> {
         let dir = self.dir();
         let manifest = Manifest::load_node(&dir)?;
         let path = Manifest::path_in(&dir).display().to_string();
@@ -1114,13 +1125,8 @@ impl JobRegistry {
                 manifest: path,
             });
         }
-        // Owned by the caller, so the caller may stop it; the console's start
-        // is the node's own. Named apart from the caller's own declarations,
-        // so a restart reads the node's manifest again.
-        let scope = match caller {
-            Caller::Scoped(scope) => scope.clone(),
-            Caller::Console => Scope::System,
-        };
+        // Named apart from any workspace's declarations, so a restart reads
+        // the node's manifest again.
         let mut entry = entry.clone();
         entry.name = format!("{RECIPE_PREFIX}{}", entry.name);
         let allocated = {
@@ -1128,7 +1134,7 @@ impl JobRegistry {
             port::allocate(
                 &inner.store,
                 PortRange::from_env(),
-                &scope,
+                scope,
                 Some(&entry.name),
                 entry.port,
             )?
@@ -1137,7 +1143,7 @@ impl JobRegistry {
         self.start(request_from(
             &entry,
             PathBuf::from(&entry.cwd),
-            &scope,
+            scope,
             allocated,
         ))
     }
@@ -1438,7 +1444,8 @@ impl JobRegistry {
         // a duplicate, not a restart.
         let _ = self.kill(id, caller);
         match name.strip_prefix(RECIPE_PREFIX) {
-            Some(recipe) => self.start_recipe(recipe, caller),
+            // The restarted job keeps its owner, whoever asked.
+            Some(recipe) => self.start_recipe_for(recipe, &owner),
             None => self.start_named(&name, caller),
         }
     }

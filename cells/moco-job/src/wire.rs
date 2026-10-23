@@ -761,6 +761,7 @@ pub fn dispatch(
 pub const METHODS: &[&str] = &[
     "start",
     "start_named",
+    "recipes",
     "restart",
     "ensure",
     "clear",

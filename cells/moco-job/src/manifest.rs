@@ -168,6 +168,7 @@ impl Manifest {
         manifest.check_unique_names(&path)?;
         manifest.check_tokens(&path)?;
         manifest.check_no_boot(&path)?;
+        manifest.check_no_recipe_names(&path)?;
         Ok(manifest)
     }
 
@@ -198,6 +199,25 @@ impl Manifest {
         manifest.check_unique_names(&path)?;
         manifest.check_tokens(&path)?;
         Ok(manifest)
+    }
+
+    /// A workspace cannot declare a name in the node recipes' namespace: a
+    /// restart of its job would run the node's recipe instead.
+    ///
+    /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
+    fn check_no_recipe_names(&self, path: &Path) -> Result<(), JobError> {
+        let prefix = crate::registry::RECIPE_PREFIX;
+        match self.proc.iter().find(|e| e.name.starts_with(prefix)) {
+            Some(entry) => Err(JobError::Manifest {
+                path: path.display().to_string(),
+                detail: format!(
+                    "`{}`: names starting with `{prefix}` are the node's recipes; \
+                     rename the entry",
+                    entry.name
+                ),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// A workspace cannot declare a boot job.
