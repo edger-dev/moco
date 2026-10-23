@@ -225,6 +225,11 @@ fn signal_group(pid: u32, pid_start: u64, signal: nix::sys::signal::Signal) -> b
 /// Shared by workspace `start_named` and node `boot`: the two differ only in
 /// which manifest was read and which scope owns the result, and a second copy
 /// of this would be a place for the two to quietly diverge.
+/// The name a recipe job runs under: apart from any workspace declaration.
+///
+/// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
+pub const RECIPE_PREFIX: &str = "node:";
+
 fn request_from(
     entry: &crate::manifest::ProcEntry,
     cwd: PathBuf,
@@ -1059,19 +1064,82 @@ impl JobRegistry {
     ///
     /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
     pub fn recipes(&self) -> Result<Vec<crate::manifest::ProcEntry>, JobError> {
-        Ok(Vec::new())
+        let manifest = Manifest::load_node(self.dir())?;
+        Ok(manifest
+            .proc
+            .into_iter()
+            .filter(|e| e.autostart == crate::lifecycle::Autostart::Manual && self.admits(e))
+            .collect())
+    }
+
+    /// Whether this node is among an entry's hosts (none named: any node).
+    fn admits(&self, entry: &crate::manifest::ProcEntry) -> bool {
+        entry.hosts.is_empty() || entry.hosts.iter().any(|h| h == &self.node)
     }
 
     /// Start the node's recipe `name` for `caller`.
     ///
     /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
     pub fn start_recipe(&self, name: &str, caller: &Caller) -> Result<JobId, JobError> {
-        let _ = caller;
-        Err(JobError::Undeclared {
-            name: name.to_string(),
-            manifest: String::new(),
-            declared: Vec::new(),
-        })
+        let dir = self.dir();
+        let manifest = Manifest::load_node(&dir)?;
+        let path = Manifest::path_in(&dir).display().to_string();
+        let Some(entry) = manifest.get(name) else {
+            return Err(JobError::Undeclared {
+                name: name.to_string(),
+                manifest: path,
+                declared: self.recipes()?.into_iter().map(|e| e.name).collect(),
+            });
+        };
+        // Refusals name the entry and the reason, as any explicit start's do.
+        if entry.autostart != crate::lifecycle::Autostart::Manual {
+            return Err(JobError::Refused {
+                name: name.to_string(),
+                refusal: "only the node manifest's manual entries are recipes".into(),
+            });
+        }
+        if !self.admits(entry) {
+            return Err(JobError::Refused {
+                name: name.to_string(),
+                refusal: format!(
+                    "it is declared for {}, not for this node ({})",
+                    entry.hosts.join(", "),
+                    self.node
+                ),
+            });
+        }
+        if entry.cwd.is_empty() {
+            return Err(JobError::NodeJobNeedsCwd {
+                name: name.to_string(),
+                manifest: path,
+            });
+        }
+        // Owned by the caller, so the caller may stop it; the console's start
+        // is the node's own. Named apart from the caller's own declarations,
+        // so a restart reads the node's manifest again.
+        let scope = match caller {
+            Caller::Scoped(scope) => scope.clone(),
+            Caller::Console => Scope::System,
+        };
+        let mut entry = entry.clone();
+        entry.name = format!("{RECIPE_PREFIX}{}", entry.name);
+        let allocated = {
+            let inner = self.locked();
+            port::allocate(
+                &inner.store,
+                PortRange::from_env(),
+                &scope,
+                Some(&entry.name),
+                entry.port,
+            )?
+        };
+        // Down the same path as every start: the gate runs there.
+        self.start(request_from(
+            &entry,
+            PathBuf::from(&entry.cwd),
+            &scope,
+            allocated,
+        ))
     }
 
     /// Start everything the **node** declares for boot.
@@ -1369,7 +1437,10 @@ impl JobRegistry {
         // Stop the old instance first; a restart that left two running would be
         // a duplicate, not a restart.
         let _ = self.kill(id, caller);
-        self.start_named(&name, caller)
+        match name.strip_prefix(RECIPE_PREFIX) {
+            Some(recipe) => self.start_recipe(recipe, caller),
+            None => self.start_named(&name, caller),
+        }
     }
 
     /// Start this workspace's `session` entries that are not already running.

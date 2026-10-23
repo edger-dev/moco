@@ -121,7 +121,8 @@ fn a_recipe_starts_by_name_owned_by_its_caller() {
     assert_eq!(reg.scope_of(&id), Some(Scope::resolve(&ws)));
     assert_eq!(reg.cwd_of(&id), Some(d.clone()));
     assert_eq!(reg.argv_of(&id), Some(argv(&["echo", "refreshed"])));
-    assert_eq!(settled(&reg, &id), JobStatus::Done { code: 0 });
+    reg.wait(&id).unwrap();
+    assert_eq!(reg.status_of(&id), Some(JobStatus::Done { code: 0 }));
 
     let long = dir("long");
     write_manifest(&long, r#"proc ({name nap, argv (sleep 30), cwd "{cwd}"})"#);
@@ -167,7 +168,8 @@ fn a_recipe_passes_the_gate() {
     let (caller, _) = session();
 
     let ok = reg.start_recipe("ok", &caller).unwrap();
-    assert_eq!(settled(&reg, &ok), JobStatus::Done { code: 0 });
+    reg.wait(&ok).unwrap();
+    assert_eq!(reg.status_of(&ok), Some(JobStatus::Done { code: 0 }));
     assert_eq!(reg.verdict_of(&ok), Some(Verdict::SeedAllow));
 
     let ask = reg.start_recipe("ask", &caller).unwrap();

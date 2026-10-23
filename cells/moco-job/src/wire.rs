@@ -595,7 +595,12 @@ pub fn dispatch(
         }
         "start_named" => {
             let req: StartNamedRequest = read(method, request)?;
-            let id = registry.start_named(&req.name, &req.caller.resolve())?;
+            let caller = req.caller.resolve();
+            let id = if req.node_recipe {
+                registry.start_recipe(&req.name, &caller)?
+            } else {
+                registry.start_named(&req.name, &caller)?
+            };
             write(
                 method,
                 &StartReply {
@@ -604,6 +609,21 @@ pub fn dispatch(
                     human_view: Default::default(),
                 },
             )
+        }
+        "recipes" => {
+            let _: RecipesRequest = read(method, request)?;
+            let recipes = registry
+                .recipes()?
+                .into_iter()
+                .map(|e| RecipeSummary {
+                    name: e.name,
+                    argv: e.argv,
+                    cwd: e.cwd,
+                    about: e.about,
+                    lifetime: e.lifetime,
+                })
+                .collect();
+            write(method, &RecipesReply { recipes })
         }
         "restart" => {
             let req: RestartRequest = read(method, request)?;
