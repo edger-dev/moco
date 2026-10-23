@@ -1,0 +1,27 @@
+# Plan — an ad-hoc start without a cwd runs in the node's allowed root
+
+**Task:** kino://4a56b1577d2e08db03388f22b9823092509a1c4bbc25fcbbfe0320537ae33bff
+
+Two phases, each tests → implementation → fresh review → fixes.
+
+1. **moco.** `confined_cwd` and `preflight` read an empty cwd as the
+   node's default directory: the allowed root when governed (confined like
+   any cwd), the daemon's own current directory when not. A job's scope
+   falls back to the directory it runs in, not the empty request. The wire's
+   `cwd` fields say empty means the node's default.
+2. **kudo.** `job_start_adhoc` with no cwd sends the shim's own directory
+   only when the target is this machine (`node` is this node's name; a link
+   is another process of the same node, so it does not decide); otherwise it
+   sends none. The tool's description says so; docs.
+
+## Status
+
+- Phase 1 done (moco 93527d8, 5bed6d1, review fixes): an ungoverned daemon
+  whose own directory is gone refuses (`NoDefaultCwd`) rather than run in
+  `/`; a refused default is audited with the directory tried; the spec states
+  the ungoverned default (v2).
+- Phase 2 done (kudo 0618865, eda6424, e87751e): the shim sends its own
+  directory only to its own node. Review fix: the shim names its node as the
+  node does (`KUDO_NODE`, else `NODE_ID`, else the hostname — one rule in
+  kudo-worker), so a node with its own `NODE_ID` is not taken for a remote
+  one. Docs say the allowed root is `/` unless the node sets one.
