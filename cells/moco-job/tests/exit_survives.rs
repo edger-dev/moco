@@ -226,3 +226,104 @@ fn a_terminal_jobs_holder_writes_the_exit_too() {
     assert_eq!(exit.trim(), "5");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A stop reaches the job, not only its holder: a job that ignores the
+/// polite signal is still gone once the stop returns.
+#[test]
+fn a_stop_reaches_a_job_that_ignores_sigterm() {
+    let d = dir();
+    let reg = daemon(&d);
+    let id = reg
+        .start(JobRequest::new(
+            ["sh", "-c", "trap '' TERM; while :; do sleep 0.1; done"],
+            root(),
+        ))
+        .unwrap();
+    assert!(until(Duration::from_secs(5), || reg.job_pid_of(&id)
+        != reg.pid_of(&id)));
+    let job = reg.job_pid_of(&id).unwrap();
+    let start = moco_job::procfs::start_time(job).unwrap();
+    reg.kill(&id, &moco_job::Caller::Console).unwrap();
+    assert_eq!(reg.wait(&id).unwrap().status, JobStatus::Killed);
+    assert!(
+        until(Duration::from_secs(15), || moco_job::liveness(job, start)
+            == Liveness::Dead),
+        "the job itself is gone"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A job that handles SIGTERM by finishing up ends as stopped, and its
+/// holder keeps the exit.
+#[test]
+fn a_job_that_handles_sigterm_ends_and_its_exit_is_kept() {
+    let d = dir();
+    let reg = daemon(&d);
+    let id = reg
+        .start(JobRequest::new(
+            [
+                "sh",
+                "-c",
+                "trap 'exit 9' TERM; while :; do sleep 0.1; done",
+            ],
+            root(),
+        ))
+        .unwrap();
+    assert!(until(Duration::from_secs(5), || reg.job_pid_of(&id)
+        != reg.pid_of(&id)));
+    let job = reg.job_pid_of(&id).unwrap();
+    let start = moco_job::procfs::start_time(job).unwrap();
+    reg.kill(&id, &moco_job::Caller::Console).unwrap();
+    assert_eq!(reg.wait(&id).unwrap().status, JobStatus::Killed);
+    assert!(until(Duration::from_secs(5), || moco_job::liveness(
+        job, start
+    ) == Liveness::Dead));
+    let capture = PathBuf::from(record_of(&d, &id).capture);
+    assert!(
+        until(Duration::from_secs(5), || HolderPaths::beside(&capture)
+            .exit
+            .exists()),
+        "the holder outlived the signal and wrote the exit"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A deadline ends the job itself, not only its holder.
+#[test]
+fn a_deadline_ends_the_job_itself() {
+    let d = dir();
+    let reg = daemon(&d);
+    let id = reg
+        .start(JobRequest::new(["sleep", "30"], root()).with_deadline(Duration::from_millis(300)))
+        .unwrap();
+    assert!(until(Duration::from_secs(5), || reg.job_pid_of(&id)
+        != reg.pid_of(&id)));
+    let job = reg.job_pid_of(&id).unwrap();
+    let start = moco_job::procfs::start_time(job).unwrap();
+    assert_eq!(reg.wait(&id).unwrap().status, JobStatus::TimedOut);
+    assert!(
+        until(Duration::from_secs(5), || moco_job::liveness(job, start)
+            == Liveness::Dead),
+        "the job itself is gone"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A caller's own PATH is searched too: a program on none of it is refused
+/// at the start.
+#[test]
+fn a_callers_own_path_is_searched_at_the_start() {
+    let d = dir();
+    let reg = daemon(&d);
+    let err = reg
+        .start(
+            JobRequest::new(["no-such-program-moco-test"], root())
+                .with_env(vec![("PATH".into(), "/nonexistent".into())]),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("no-such-program-moco-test"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
