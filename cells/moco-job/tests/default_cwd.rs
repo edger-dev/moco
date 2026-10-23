@@ -3,7 +3,7 @@
 //! on another machine has no way to name a path here, so "none" must mean
 //! somewhere that exists. An explicit cwd is still used as given and confined.
 //!
-//! implements: 213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104@213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104
+//! implements: 213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104@b6cfc7656b31f14e3569d756e5cf9973fae48ad732620e374c6b81d3bb0e35a4
 
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
@@ -131,4 +131,43 @@ fn an_empty_cwd_over_the_wire_is_the_default() {
     let id = moco_job::JobId(started.id);
     assert_eq!(output(&reg, &id), root.display().to_string());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// No cwd on an argv no rule allows: the request waiting for a verdict names
+/// the allowed root, and once allowed the job runs there.
+#[test]
+fn a_waiting_start_without_a_cwd_names_the_allowed_root() {
+    let root = allowed("pending");
+    let reg = governed(&root);
+    let id = reg.start(JobRequest::new(["sh", "-c", "pwd"], "")).unwrap();
+    let pending = reg.pending();
+    let waiting = pending.iter().find(|p| p.id == id).unwrap();
+    assert_eq!(waiting.cwd, root);
+    reg.decide(&id, moco_job::Decision::allow()).unwrap();
+    assert_eq!(reg.wait(&id).unwrap().status, JobStatus::Done { code: 0 });
+    assert_eq!(output(&reg, &id), root.display().to_string());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Ungoverned, a preflight without a cwd reports the daemon's own directory.
+#[test]
+fn an_ungoverned_preflight_without_a_cwd_reports_the_daemons_directory() {
+    let reg = JobRegistry::ungoverned().unwrap();
+    let out = reg.preflight(&argv(&["pwd"]), std::path::Path::new(""));
+    assert_eq!(out.cwd_error, None);
+    let own = std::env::current_dir().unwrap().canonicalize().unwrap();
+    assert_eq!(out.resolved_cwd, Some(own));
+}
+
+/// An allowed root that is gone refuses a start without a cwd, and the audit
+/// names the directory that was tried, not an empty one.
+#[test]
+fn a_refused_default_is_audited_with_the_directory_tried() {
+    let root = allowed("gone");
+    let reg = governed(&root);
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(reg.start(JobRequest::new(["pwd"], "")).is_err());
+    let records = reg.audit().records().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].cwd, root.display().to_string());
 }

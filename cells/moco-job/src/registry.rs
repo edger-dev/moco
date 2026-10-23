@@ -2153,14 +2153,20 @@ impl JobRegistry {
     ///
     /// implements: agent-self-sufficiency
     pub fn preflight(&self, argv: &[String], cwd: &Path) -> Preflight {
-        let cwd = &self.requested_cwd(cwd);
-        let (resolved_cwd, cwd_error) = match &self.policy {
-            Some(policy) => match confine(cwd, &policy.allowed_root) {
-                Ok(path) => (Some(path), None),
-                Err(msg) => (None, Some(msg)),
-            },
-            None => (cwd.canonicalize().ok(), None),
+        let (cwd, (resolved_cwd, cwd_error)) = match self.requested_cwd(cwd) {
+            Err(e) => (cwd.to_path_buf(), (None, Some(e.to_string()))),
+            Ok(cwd) => {
+                let resolved = match &self.policy {
+                    Some(policy) => match confine(&cwd, &policy.allowed_root) {
+                        Ok(path) => (Some(path), None),
+                        Err(msg) => (None, Some(msg)),
+                    },
+                    None => (cwd.canonicalize().ok(), None),
+                };
+                (cwd, resolved)
+            }
         };
+        let cwd = &cwd;
 
         // Resolve a relative program against the cwd the job would actually get.
         let resolve_base = resolved_cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
@@ -2226,9 +2232,13 @@ impl JobRegistry {
         let cwd = match self.confined_cwd(&req.cwd) {
             Ok(cwd) => cwd,
             Err(e) => {
+                // The directory that was tried, so a defaulted one is named.
+                let tried = self
+                    .requested_cwd(&req.cwd)
+                    .unwrap_or_else(|_| req.cwd.clone());
                 self.record_rejected(
                     &req.argv,
-                    &req.cwd,
+                    &tried,
                     Verdict::SeedDeny,
                     JobStatus::Denied {
                         reason: DeniedReason::CwdEscape,
@@ -2406,20 +2416,25 @@ impl JobRegistry {
     /// daemon's own directory when not. A caller on another machine has no
     /// way to name a path here, so "none" must mean somewhere that exists.
     ///
-    /// implements: 213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104@213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104
-    fn requested_cwd(&self, cwd: &Path) -> PathBuf {
+    /// implements: 213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104@b6cfc7656b31f14e3569d756e5cf9973fae48ad732620e374c6b81d3bb0e35a4
+    ///
+    /// An ungoverned daemon whose own directory is gone refuses rather than
+    /// guess one.
+    fn requested_cwd(&self, cwd: &Path) -> Result<PathBuf, JobError> {
         if !cwd.as_os_str().is_empty() {
-            return cwd.to_path_buf();
+            return Ok(cwd.to_path_buf());
         }
         match &self.policy {
-            Some(policy) => policy.allowed_root.clone(),
-            None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            Some(policy) => Ok(policy.allowed_root.clone()),
+            None => std::env::current_dir().map_err(|e| JobError::NoDefaultCwd {
+                reason: e.to_string(),
+            }),
         }
     }
 
     /// Resolve a request's cwd under the node's confinement, if any.
     fn confined_cwd(&self, cwd: &Path) -> Result<PathBuf, JobError> {
-        let cwd = &self.requested_cwd(cwd);
+        let cwd = &self.requested_cwd(cwd)?;
         match &self.policy {
             Some(policy) => confine(cwd, &policy.allowed_root).map_err(|e| {
                 if e == NOT_UTF8 {

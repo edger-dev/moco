@@ -83,6 +83,9 @@ pub enum JobError {
     /// The job's cwd is not valid UTF-8, so an audit record could not name it
     /// faithfully. Rejected up front rather than recorded inaccurately.
     CwdNotUtf8 { cwd: String },
+    /// A start named no cwd, and the node has no default directory to give
+    /// it: ungoverned, its daemon's own directory could not be read.
+    NoDefaultCwd { reason: String },
     /// A decision was offered for a job that is not awaiting one.
     NotPending(JobId),
     /// The node's committed rule seed could not be parsed.
@@ -196,6 +199,11 @@ impl fmt::Display for JobError {
             JobError::CwdNotUtf8 { cwd } => {
                 write!(f, "cwd '{cwd}' is not valid UTF-8")
             }
+            JobError::NoDefaultCwd { reason } => write!(
+                f,
+                "no cwd was given and this node has no default directory: its daemon's \
+                 own directory could not be read ({reason})"
+            ),
             JobError::NotPending(id) => write!(f, "job is not awaiting approval: {id}"),
             JobError::Seed(msg) => write!(f, "{msg}"),
             JobError::Audit(msg) => write!(f, "{msg}"),

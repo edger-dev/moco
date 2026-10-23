@@ -1,0 +1,2 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"store","kind":"markdown","id":"dcffb8718aa770b6218a9dad73b9730a7224a931e42fa8e9190e10a35a9502f5","hash":"5cb65e3f1b40b400fdd35423c5fcff137dc441fd12f92765b8bdeeae3f65699e","parents":["dcffb8718aa770b6218a9dad73b9730a7224a931e42fa8e9190e10a35a9502f5"],"ts":"2026-10-23T16:55:04.800069917Z","author":"YJ Park","provenance":"adhoc-cwd","metadata":{"kudo::designs":"ab39d35e5a302333c60baa345c55f92821806d7f4334e5cc4cc3de03f93457cc","name":"adhoc-cwd-defaults-to-node-root-plan","status::resolved":"false"}}
