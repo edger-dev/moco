@@ -232,7 +232,7 @@ fn a_terminal_jobs_holder_writes_the_exit_too() {
 #[test]
 fn a_stop_reaches_a_job_that_ignores_sigterm() {
     let d = dir();
-    let reg = daemon(&d);
+    let reg = daemon(&d).with_kill_grace(Duration::from_millis(200));
     let id = reg
         .start(JobRequest::new(
             ["sh", "-c", "trap '' TERM; while :; do sleep 0.1; done"],
@@ -244,6 +244,11 @@ fn a_stop_reaches_a_job_that_ignores_sigterm() {
     let job = reg.job_pid_of(&id).unwrap();
     let start = moco_job::procfs::start_time(job).unwrap();
     reg.kill(&id, &moco_job::Caller::Console).unwrap();
+    // The daemon's tick escalates a stop the job ignored.
+    assert!(until(Duration::from_secs(10), || {
+        reg.supervise();
+        reg.status_of(&id).is_some_and(|s| s.is_terminal())
+    }));
     assert_eq!(reg.wait(&id).unwrap().status, JobStatus::Killed);
     assert!(
         until(Duration::from_secs(15), || moco_job::liveness(job, start)

@@ -1,0 +1,2 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"store","kind":"markdown","id":"54ae09388d6741b18bd305993019454b413aacea580a0abba5c5b5f2d73f3049","hash":"3cba10d87ac9f8257daeb57fd27912b4d94e7c96c3b148c55eb74f70c4260160","parents":["54ae09388d6741b18bd305993019454b413aacea580a0abba5c5b5f2d73f3049"],"ts":"2026-10-23T15:19:52.8643842Z","author":"YJ Park","provenance":"exit-recovery","metadata":{"kudo::designs":"ab39d35e5a302333c60baa345c55f92821806d7f4334e5cc4cc3de03f93457cc","name":"exit-survives-node-restart-plan","status::resolved":"false"}}

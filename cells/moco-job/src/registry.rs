@@ -506,6 +506,12 @@ fn effective_path() -> String {
 /// used as given (relative to the job's `cwd`), a bare name is searched on PATH.
 /// Mirrors `execvp`, so preflight names the binary that would actually run.
 fn resolve_program(program: &str, cwd: &Path) -> Option<PathBuf> {
+    resolve_program_on(program, cwd, None)
+}
+
+/// `resolve_program`, searching `path` (a job's own PATH) when given, the
+/// daemon's otherwise.
+fn resolve_program_on(program: &str, cwd: &Path, path: Option<&str>) -> Option<PathBuf> {
     if program.contains('/') {
         let p = Path::new(program);
         let candidate = if p.is_absolute() {
@@ -515,7 +521,11 @@ fn resolve_program(program: &str, cwd: &Path) -> Option<PathBuf> {
         };
         return is_executable(&candidate).then_some(candidate);
     }
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
+    let path = match path {
+        Some(path) => std::ffi::OsString::from(path),
+        None => std::env::var_os("PATH")?,
+    };
+    std::env::split_paths(&path).find_map(|dir| {
         let candidate = dir.join(program);
         is_executable(&candidate).then_some(candidate)
     })
@@ -575,8 +585,12 @@ fn spawn_child(
     // implements: 0119d16e256891de4a71a14418f59c33419207f49792e58001639f8cbef567a6@d7ba7c887089648434bc819ad57473bb930242c27396d150b11617388bb85da0
     if let (HumanView::Logs, Some(holder)) = (human_view, pty_holder) {
         let program = argv.first().ok_or(JobError::EmptyArgv)?;
-        let own_path = env.iter().any(|(k, _)| k == "PATH");
-        if !own_path && resolve_program(program, cwd).is_none() {
+        let path = env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.as_str());
+        if resolve_program_on(program, cwd, path).is_none() {
             return Err(JobError::Spawn {
                 program: program.clone(),
                 searched_path: effective_path(),
@@ -2912,6 +2926,12 @@ impl JobRegistry {
                 // Reap before recording: if the audit write fails we must not
                 // drop the child un-reaped (its handle is already out of the
                 // registry, so nothing else would ever collect it).
+                // The whole group: the child may be a holder, with the job
+                // beneath it. Not yet reaped, so its pid is still its group.
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(child.id() as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
                 let _ = child.kill();
                 let _ = child.wait();
                 let claimed = {

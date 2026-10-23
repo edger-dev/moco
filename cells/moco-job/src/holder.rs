@@ -141,6 +141,28 @@ fn run_logs(config: HolderConfig) -> Result<i32, JobError> {
             source,
         })?;
     drop(command);
+    // **The holder outlives the stop it relays.** A stop signals the whole
+    // group; were the holder to die of it at once, the daemon would reap it,
+    // record the job stopped, and never follow up on a job that ignored the
+    // signal. Blocked, the signals stay pending on the holder, which waits for
+    // the job and keeps its exit. Blocked only once the job is spawned: a
+    // child inherits its parent's mask, and resetting it in the child would
+    // take `pre_exec` (unsafe). A stop landing in the instant between the two
+    // takes the holder early — the job still gets the signal itself.
+    {
+        use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+        let mut stops = SigSet::empty();
+        for signal in [
+            Signal::SIGTERM,
+            Signal::SIGINT,
+            Signal::SIGHUP,
+            Signal::SIGQUIT,
+        ] {
+            stops.add(signal);
+        }
+        pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&stops), None)
+            .map_err(|e| JobError::Audit(format!("could not block stop signals: {e}")))?;
+    }
     let _ = std::fs::write(&config.paths.job_pid, child.id().to_string());
     let status = child.wait().map_err(JobError::Io)?;
     let code = exit_code(status);
