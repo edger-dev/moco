@@ -146,6 +146,9 @@ fn holder_child(capture: &Path) -> Option<u32> {
 /// Spawn a terminal job under its own PTY holder.
 ///
 /// implements: pty-holder-owns-the-terminal
+/// Spawn the holder for a job: a terminal job's (it owns the pty), or a log
+/// job's when `logs` carries the capture its output goes to.
+#[allow(clippy::too_many_arguments)]
 fn spawn_holder(
     holder: &Path,
     argv: &[String],
@@ -154,11 +157,15 @@ fn spawn_holder(
     port: Option<u16>,
     port_env: &str,
     env: &[(String, String)],
+    logs: Option<&File>,
 ) -> Result<Child, JobError> {
     let mut command = Command::new(holder);
     // On the holder's own environment, which the job inherits — never as
     // `--env` arguments, which anyone on the machine could read in `ps`.
     command.envs(env.iter().map(|(k, v)| (k, v)));
+    if logs.is_some() {
+        command.arg("--logs");
+    }
     command
         .arg("--cwd")
         .arg(cwd)
@@ -176,13 +183,21 @@ fn spawn_holder(
     // The holder's stdio goes nowhere: the job's output travels through the pty
     // into the capture, and anything the holder itself has to say is a failure
     // it reports by exiting non-zero.
+    // A log job's holder hands it the capture as its stdout and stderr.
+    let (stdout, stderr) = match logs {
+        Some(capture) => (
+            Stdio::from(capture.try_clone().map_err(JobError::Io)?),
+            Stdio::from(capture.try_clone().map_err(JobError::Io)?),
+        ),
+        None => (Stdio::null(), Stdio::null()),
+    };
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     command
         .current_dir(cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .map_err(|source| JobError::Spawn {
             program: holder.display().to_string(),
@@ -550,7 +565,34 @@ fn spawn_child(
     // `tail`, compaction, liveness, restart policy and stop all keep working
     // without knowing a holder is involved.
     if let (HumanView::Terminal, Some(holder)) = (human_view, pty_holder) {
-        return spawn_holder(holder, argv, cwd, capture_path, port, port_env, env);
+        return spawn_holder(holder, argv, cwd, capture_path, port, port_env, env, None);
+    }
+    // **A log job under the holder too, where the node has one**: the holder
+    // outlives the daemon and writes the job's exit, so a job that ends while
+    // no daemon is there (a deploy restarting the node) still reads back how
+    // it ended. A program that cannot start is refused here, as it is without
+    // the holder, rather than surfacing later as the holder's exit code.
+    // implements: 0119d16e256891de4a71a14418f59c33419207f49792e58001639f8cbef567a6@d7ba7c887089648434bc819ad57473bb930242c27396d150b11617388bb85da0
+    if let (HumanView::Logs, Some(holder)) = (human_view, pty_holder) {
+        let program = argv.first().ok_or(JobError::EmptyArgv)?;
+        let own_path = env.iter().any(|(k, _)| k == "PATH");
+        if !own_path && resolve_program(program, cwd).is_none() {
+            return Err(JobError::Spawn {
+                program: program.clone(),
+                searched_path: effective_path(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            });
+        }
+        return spawn_holder(
+            holder,
+            argv,
+            cwd,
+            capture_path,
+            port,
+            port_env,
+            env,
+            Some(capture),
+        );
     }
 
     let (program, args) = argv.split_first().ok_or(JobError::EmptyArgv)?;
@@ -832,7 +874,13 @@ impl JobRegistry {
                     Liveness::Alive => JobStatus::Running,
                     // Gone, pid reused, or unprobeable: either way we cannot
                     // claim it is running and cannot know how it ended.
-                    Liveness::Dead | Liveness::Unsupported => JobStatus::OutcomeUnknown,
+                    // Its holder may have kept the exit for us.
+                    Liveness::Dead | Liveness::Unsupported => {
+                        match crate::holder::written_exit(&capture) {
+                            Some(code) => JobStatus::Done { code },
+                            None => JobStatus::OutcomeUnknown,
+                        }
+                    }
                 }
             } else if record.status == JobStatus::PendingApproval {
                 // Its proposal did not survive the restart, so no verdict can
@@ -2627,7 +2675,11 @@ impl JobRegistry {
                             handle.status = if handle.killed {
                                 JobStatus::Killed
                             } else {
-                                JobStatus::OutcomeUnknown
+                                // Unknown only when no holder kept the exit.
+                                crate::holder::written_exit(&handle.capture)
+                                    .map_or(JobStatus::OutcomeUnknown, |code| JobStatus::Done {
+                                        code,
+                                    })
                             };
                             let _ = persist(store, id, handle);
                             claimed = self.claim(id, handle);
@@ -2799,7 +2851,11 @@ impl JobRegistry {
                             handle.status = if handle.killed {
                                 JobStatus::Killed
                             } else {
-                                JobStatus::OutcomeUnknown
+                                // Unknown only when no holder kept the exit.
+                                crate::holder::written_exit(&handle.capture)
+                                    .map_or(JobStatus::OutcomeUnknown, |code| JobStatus::Done {
+                                        code,
+                                    })
                             };
                             let _ = persist(store, id, handle);
                             settled = Some((outcome_of(handle), self.claim(id, handle)));

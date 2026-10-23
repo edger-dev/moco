@@ -84,6 +84,69 @@ pub struct HolderConfig {
     pub paths: HolderPaths,
     /// Extra environment for the child, e.g. an allocated port.
     pub env: Vec<(String, String)>,
+    /// A log-lens job: no pty; the job writes the holder's own stdout and
+    /// stderr (the capture), and the holder is only there to outlive the
+    /// daemon and keep the job's exit.
+    pub logs: bool,
+}
+
+/// The code a holder exits with for a job that ended `status`: its own exit
+/// code, or 128 + the signal that ended it, as a shell reports it.
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|s| 128 + s))
+        .unwrap_or(-1)
+}
+
+/// Write the job's exit beside its capture, atomically: a daemon reading it
+/// sees a whole number or nothing.
+///
+/// implements: 0119d16e256891de4a71a14418f59c33419207f49792e58001639f8cbef567a6@d7ba7c887089648434bc819ad57473bb930242c27396d150b11617388bb85da0
+fn write_exit(paths: &HolderPaths, code: i32) {
+    let tmp = paths.exit.with_extension("exit.tmp");
+    if std::fs::write(&tmp, format!("{code}\n")).is_ok() {
+        let _ = std::fs::rename(&tmp, &paths.exit);
+    }
+}
+
+/// The exit a holder wrote for the job captured at `capture`, if it did.
+pub fn written_exit(capture: &Path) -> Option<i32> {
+    std::fs::read_to_string(HolderPaths::beside(capture).exit)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Run one log-lens job and keep its exit.
+fn run_logs(config: HolderConfig) -> Result<i32, JobError> {
+    let (program, args) = config.argv.split_first().ok_or(JobError::EmptyArgv)?;
+    let mut command = Command::new(program);
+    for (key, value) in &config.env {
+        command.env(key, value);
+    }
+    // In the holder's own process group (which it leads), so a stop aimed at
+    // the group reaches the job; its stdout and stderr are the holder's — the
+    // capture the daemon opened.
+    let mut child = command
+        .args(args)
+        .current_dir(&config.cwd)
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|source| JobError::Spawn {
+            program: program.clone(),
+            searched_path: String::new(),
+            source,
+        })?;
+    drop(command);
+    let _ = std::fs::write(&config.paths.job_pid, child.id().to_string());
+    let status = child.wait().map_err(JobError::Io)?;
+    let code = exit_code(status);
+    write_exit(&config.paths, code);
+    let _ = std::fs::remove_file(&config.paths.job_pid);
+    Ok(code)
 }
 
 /// Run one job under a pty and hold that pty until the job ends.
@@ -93,6 +156,9 @@ pub struct HolderConfig {
 ///
 /// implements: pty-holder-owns-the-terminal
 pub fn run(config: HolderConfig) -> Result<i32, JobError> {
+    if config.logs {
+        return run_logs(config);
+    }
     let (program, args) = config.argv.split_first().ok_or(JobError::EmptyArgv)?;
 
     let size = nix::pty::Winsize {
@@ -131,6 +197,10 @@ pub fn run(config: HolderConfig) -> Result<i32, JobError> {
             searched_path: String::new(),
             source,
         })?;
+    // The command holds the slave's descriptors: dropped, so the master reads
+    // end-of-file once the job's own copies close — without this the holder
+    // waits on itself forever after the job has ended.
+    drop(command);
 
     // Published before the first read, so a daemon that turns up immediately
     // can already tell which pid is the job rather than the holder.
@@ -220,9 +290,11 @@ pub fn run(config: HolderConfig) -> Result<i32, JobError> {
     let _ = flusher.join();
 
     let status = child.wait().map_err(JobError::Io)?;
+    let code = exit_code(status);
+    write_exit(&config.paths, code);
     let _ = std::fs::remove_file(&config.paths.job_pid);
     let _ = std::fs::remove_file(&config.paths.input);
-    Ok(status.code().unwrap_or(-1))
+    Ok(code)
 }
 
 /// Write the screen atomically, so a reader never sees half a frame.
@@ -248,11 +320,13 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Holder
     let mut capture = None;
     let mut env = Vec::new();
     let mut argv = Vec::new();
+    let mut logs = false;
 
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--cwd" => cwd = it.next(),
+            "--logs" => logs = true,
             "--capture" => capture = it.next(),
             "--rows" => rows = it.next().and_then(|v| v.parse().ok()).unwrap_or(rows),
             "--cols" => cols = it.next().and_then(|v| v.parse().ok()).unwrap_or(cols),
@@ -283,5 +357,6 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Holder
         cols,
         paths: HolderPaths::beside(capture),
         env,
+        logs,
     })
 }
