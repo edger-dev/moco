@@ -56,6 +56,9 @@ impl WireCaller {
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct StartRequest {
     pub argv: Vec<String>,
+    /// Where the job runs; empty means the node's default directory (its
+    /// allowed root when governed), for a caller that cannot name a path on
+    /// this machine.
     pub cwd: String,
     /// Execution deadline in milliseconds; 0 means unbounded.
     pub deadline_ms: u64,
@@ -351,6 +354,9 @@ pub struct DecideReply {
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct PreflightRequest {
     pub argv: Vec<String>,
+    /// Where the job runs; empty means the node's default directory (its
+    /// allowed root when governed), for a caller that cannot name a path on
+    /// this machine.
     pub cwd: String,
 }
 

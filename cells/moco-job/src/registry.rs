@@ -2153,6 +2153,7 @@ impl JobRegistry {
     ///
     /// implements: agent-self-sufficiency
     pub fn preflight(&self, argv: &[String], cwd: &Path) -> Preflight {
+        let cwd = &self.requested_cwd(cwd);
         let (resolved_cwd, cwd_error) = match &self.policy {
             Some(policy) => match confine(cwd, &policy.allowed_root) {
                 Ok(path) => (Some(path), None),
@@ -2239,10 +2240,7 @@ impl JobRegistry {
         // An ad-hoc job belongs to the workspace it runs in unless the caller
         // says otherwise. There is always an answer, so no later code path has
         // to cope with an unowned job.
-        let scope = req
-            .scope
-            .clone()
-            .unwrap_or_else(|| Scope::resolve(&req.cwd));
+        let scope = req.scope.clone().unwrap_or_else(|| Scope::resolve(&cwd));
         let (disposition, gate_verdict) = if vouched {
             (Disposition::Allow, Verdict::Vouched)
         } else {
@@ -2403,8 +2401,25 @@ impl JobRegistry {
         Ok(id)
     }
 
+    /// The directory a request runs in: the one it names, or — naming none —
+    /// the node's default, which is its allowed root when governed and the
+    /// daemon's own directory when not. A caller on another machine has no
+    /// way to name a path here, so "none" must mean somewhere that exists.
+    ///
+    /// implements: 213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104@213c9b96650e507051c35dd2d9f71d5d8ba6bb3e8c4ec72b2a9e1b6b7f460104
+    fn requested_cwd(&self, cwd: &Path) -> PathBuf {
+        if !cwd.as_os_str().is_empty() {
+            return cwd.to_path_buf();
+        }
+        match &self.policy {
+            Some(policy) => policy.allowed_root.clone(),
+            None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        }
+    }
+
     /// Resolve a request's cwd under the node's confinement, if any.
     fn confined_cwd(&self, cwd: &Path) -> Result<PathBuf, JobError> {
+        let cwd = &self.requested_cwd(cwd);
         match &self.policy {
             Some(policy) => confine(cwd, &policy.allowed_root).map_err(|e| {
                 if e == NOT_UTF8 {
