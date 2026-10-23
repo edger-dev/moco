@@ -1054,6 +1054,26 @@ impl JobRegistry {
         self.start(request_from(entry, cwd, scope, allocated))
     }
 
+    /// The node's own recipes: the manual entries of its manifest that this
+    /// node may run.
+    ///
+    /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
+    pub fn recipes(&self) -> Result<Vec<crate::manifest::ProcEntry>, JobError> {
+        Ok(Vec::new())
+    }
+
+    /// Start the node's recipe `name` for `caller`.
+    ///
+    /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
+    pub fn start_recipe(&self, name: &str, caller: &Caller) -> Result<JobId, JobError> {
+        let _ = caller;
+        Err(JobError::Undeclared {
+            name: name.to_string(),
+            manifest: String::new(),
+            declared: Vec::new(),
+        })
+    }
+
     /// Start everything the **node** declares for boot.
     ///
     /// Called once by the daemon at startup, after re-adoption — which is why

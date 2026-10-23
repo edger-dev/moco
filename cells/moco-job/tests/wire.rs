@@ -239,6 +239,7 @@ fn the_declared_verbs_round_trip_over_bytes() {
     let payload = wire::encode(&wire::StartNamedRequest {
         name: "greet".into(),
         caller: caller.clone(),
+        node_recipe: false,
     })
     .expect("encode");
     let started: wire::StartReply =

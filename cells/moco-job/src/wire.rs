@@ -201,6 +201,32 @@ pub struct WaitReply {
 pub struct StartNamedRequest {
     pub name: String,
     pub caller: WireCaller,
+    /// The name is one of the node's own recipes, not the caller's
+    /// workspace's. Absent (an older caller) means the workspace.
+    ///
+    /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
+    #[facet(default)]
+    pub node_recipe: bool,
+}
+
+/// List the node's own recipes.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct RecipesRequest {}
+
+/// One of the node's recipes: what it runs, where, and what it is for.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct RecipeSummary {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub about: String,
+    pub lifetime: crate::lifecycle::Lifetime,
+}
+
+/// The node's recipes, in manifest order.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+pub struct RecipesReply {
+    pub recipes: Vec<RecipeSummary>,
 }
 
 /// Stop a declared job and start it from its current declaration.

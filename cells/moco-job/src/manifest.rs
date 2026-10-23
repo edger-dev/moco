@@ -98,6 +98,12 @@ pub struct ProcEntry {
     /// Advisory resident-memory ceiling in MiB. Reported, never enforced.
     #[facet(default)]
     pub mem_mb: u64,
+    /// What this entry is for, in a line: shown where a node lists its
+    /// recipes. Empty says nothing.
+    ///
+    /// implements: 7735b6fcb04483f5bb958b825bd6e7057146db208d5f5e5b9da25d4ad9dcff01
+    #[facet(default)]
+    pub about: String,
 }
 
 /// Everything one workspace declares.
@@ -295,6 +301,7 @@ mod tests {
                 machine_format: String::new(),
                 cpu_pct: 0,
                 mem_mb: 0,
+                about: String::new(),
             }],
         };
         let text = facet_styx::to_string(&manifest).expect("encode");
