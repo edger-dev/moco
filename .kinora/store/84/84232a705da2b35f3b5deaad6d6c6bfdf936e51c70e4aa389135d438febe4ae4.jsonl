@@ -1,0 +1,2 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"store","kind":"markdown","id":"67a8716be0c204fc078a379f1a08331decb62568b5e0c0bd399a824b50ad9fe4","hash":"a61d49acd601669c9abc81e21be961657f177ff6a881ec6bcb13cad2088f4fd8","parents":["77fab5c53a21c3e33bd33730717b58a5a7fe05ad3adc370d394df3d7a7b3a4bf"],"ts":"2026-10-24T14:12:45.353988057Z","author":"YJ Park","provenance":"kura-substrate","metadata":{"kudo::designs":"4e307377e8cffb5a701e86f96340cdbf37db43d28755f6819194c4764779345d","name":"byte-substrate-plan","status::resolved":"false"}}
