@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::error::PlaceError;
 use crate::hash::Hash;
 use crate::key::Key;
-use crate::place::{ByteRange, Capabilities, Child, Place, Put, copy_checked, key_names, span};
+use crate::place::{
+    Body, ByteRange, Capabilities, Child, Place, Put, copy_checked, key_names, span,
+};
 
 /// Objects in a map, shared by clones.
 #[derive(Clone)]
@@ -87,7 +89,7 @@ impl Place for MemPlace {
         Ok(Put::Stored)
     }
 
-    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Box<dyn Read + Send>, PlaceError> {
+    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Body, PlaceError> {
         self.reachable()?;
         let bytes = self
             .objects()
@@ -97,7 +99,7 @@ impl Place for MemPlace {
         let (start, end) = span(range, bytes.len() as u64);
         let mut cursor = Cursor::new(bytes);
         cursor.set_position(start);
-        Ok(Box::new(ArcReader(cursor).take(end - start)))
+        Ok(Body::new(ArcReader(cursor).take(end - start), end - start))
     }
 
     fn exists(&self, key: &Key) -> Result<bool, PlaceError> {

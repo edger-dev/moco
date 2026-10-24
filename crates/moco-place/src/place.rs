@@ -24,6 +24,45 @@ pub struct ByteRange {
     pub end: Option<u64>,
 }
 
+/// An object's bytes as a stream, knowing how many it will yield.
+pub struct Body {
+    reader: Box<dyn Read + Send>,
+    len: u64,
+}
+
+impl Body {
+    /// `reader` yields exactly `len` bytes.
+    pub fn new(reader: impl Read + Send + 'static, len: u64) -> Self {
+        Self {
+            reader: Box::new(reader),
+            len,
+        }
+    }
+
+    /// How many bytes this body yields: the object's size, or the range's.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Read for Body {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Body")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a put-once did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Put {
@@ -98,8 +137,8 @@ pub trait Place: Send + Sync {
         body: &mut dyn Read,
     ) -> Result<Put, PlaceError>;
 
-    /// The object's bytes, or the range of them asked for.
-    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Box<dyn Read + Send>, PlaceError>;
+    /// The object's bytes, or the range of them asked for, with their count.
+    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Body, PlaceError>;
 
     fn exists(&self, key: &Key) -> Result<bool, PlaceError>;
 
@@ -186,7 +225,7 @@ macro_rules! forward_place {
                 &self,
                 key: &Key,
                 range: Option<ByteRange>,
-            ) -> Result<Box<dyn Read + Send>, PlaceError> {
+            ) -> Result<Body, PlaceError> {
                 (**self).get(key, range)
             }
             fn exists(&self, key: &Key) -> Result<bool, PlaceError> {

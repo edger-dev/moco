@@ -20,7 +20,7 @@ use crate::error::PlaceError;
 use crate::hash::Hash;
 use crate::key::Key;
 use crate::place::{
-    ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, read_all,
+    Body, ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, read_all,
 };
 use crate::stream::Stream;
 
@@ -293,7 +293,7 @@ impl<P: Place> Place for Inventoried<P> {
         Ok(put)
     }
 
-    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Box<dyn Read + Send>, PlaceError> {
+    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Body, PlaceError> {
         self.place.get(key, range)
     }
 

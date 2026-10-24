@@ -27,6 +27,6 @@ pub use inventory::{Inventoried, LocalRemove, published};
 pub use key::{Key, KeyError};
 pub use mem::MemPlace;
 pub use place::{
-    ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, put_bytes, read_all,
+    Body, ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, put_bytes, read_all,
 };
 pub use stream::{Entry, Stream};

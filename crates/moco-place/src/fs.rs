@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime};
 use crate::error::PlaceError;
 use crate::hash::Hash;
 use crate::key::Key;
-use crate::place::{ByteRange, Capabilities, Child, Place, Put, copy_checked, key_names, span};
+use crate::place::{
+    Body, ByteRange, Capabilities, Child, Place, Put, copy_checked, key_names, span,
+};
 
 /// The file that makes a directory a place. A mount point with its disk
 /// unplugged lacks it, so an unmounted disk reads as offline, never as an
@@ -209,7 +211,7 @@ impl Place for FsPlace {
         placed
     }
 
-    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Box<dyn Read + Send>, PlaceError> {
+    fn get(&self, key: &Key, range: Option<ByteRange>) -> Result<Body, PlaceError> {
         self.reachable()?;
         let mut file = File::open(self.path(key)).map_err(|e| {
             if missing(&e) {
@@ -224,7 +226,7 @@ impl Place for FsPlace {
         }
         let (start, end) = span(range, meta.len());
         file.seek(SeekFrom::Start(start))?;
-        Ok(Box::new(file.take(end - start)))
+        Ok(Body::new(file.take(end - start), end - start))
     }
 
     fn exists(&self, key: &Key) -> Result<bool, PlaceError> {
