@@ -12,7 +12,10 @@
 use crate::error::PlaceError;
 use crate::hash::Hash;
 use crate::key::Key;
-use crate::place::Place;
+use crate::place::{Child, Place, put_bytes, read_all};
+
+/// Digits of an entry's timestamp: milliseconds until the year 33658.
+const TS_DIGITS: usize = 15;
 
 /// One entry of a stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,8 +40,11 @@ impl Stream {
     }
 
     /// Entries carry `.<ext>` after their hash.
-    pub fn with_ext(self, _ext: &str) -> Self {
-        self
+    pub fn with_ext(self, ext: &str) -> Self {
+        Self {
+            ext: Some(ext.to_owned()),
+            ..self
+        }
     }
 
     pub fn prefix(&self) -> &Key {
@@ -47,28 +53,59 @@ impl Stream {
 
     /// Append `bytes` as an entry stamped now.
     pub fn append(&self, place: &dyn Place, bytes: &[u8]) -> Result<Entry, PlaceError> {
-        self.append_at(place, 0, bytes)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.append_at(place, now, bytes)
     }
 
     /// Append `bytes` as an entry stamped `ts` (unix milliseconds).
-    pub fn append_at(
-        &self,
-        _place: &dyn Place,
-        _ts: u64,
-        _bytes: &[u8],
-    ) -> Result<Entry, PlaceError> {
-        Err(PlaceError::NotWritable)
+    pub fn append_at(&self, place: &dyn Place, ts: u64, bytes: &[u8]) -> Result<Entry, PlaceError> {
+        let hash = Hash::of_content(bytes);
+        let name = match &self.ext {
+            Some(ext) => format!("{ts:0TS_DIGITS$}-{hash}.{ext}"),
+            None => format!("{ts:0TS_DIGITS$}-{hash}"),
+        };
+        let key = self.prefix.join(&name)?;
+        put_bytes(place, &key, bytes)?;
+        Ok(Entry { key, ts, hash })
     }
 
     /// Every entry, oldest first (ties by hash). Anything under the prefix
     /// not named like an entry is not one.
-    pub fn entries(&self, _place: &dyn Place) -> Result<Vec<Entry>, PlaceError> {
-        Ok(Vec::new())
+    pub fn entries(&self, place: &dyn Place) -> Result<Vec<Entry>, PlaceError> {
+        let mut entries: Vec<Entry> = place
+            .list(Some(&self.prefix))?
+            .into_iter()
+            .filter_map(|child| match child {
+                Child::Object { key, .. } => self.parse(key),
+                Child::Prefix(_) => None,
+            })
+            .collect();
+        entries.sort_by(|a, b| (a.ts, &a.hash).cmp(&(b.ts, &b.hash)));
+        Ok(entries)
     }
 
     /// The newest entry.
-    pub fn latest(&self, _place: &dyn Place) -> Result<Option<Entry>, PlaceError> {
-        Ok(None)
+    pub fn latest(&self, place: &dyn Place) -> Result<Option<Entry>, PlaceError> {
+        Ok(self.entries(place)?.pop())
+    }
+
+    /// The entry a key names, if it is one of this stream's.
+    fn parse(&self, key: Key) -> Option<Entry> {
+        let name = key.name();
+        let stem = match &self.ext {
+            Some(ext) => name.strip_suffix(ext.as_str())?.strip_suffix('.')?,
+            None => name,
+        };
+        let (ts, hash) = stem.split_once('-')?;
+        if ts.len() != TS_DIGITS || !ts.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let ts = ts.parse().ok()?;
+        let hash = hash.parse().ok()?;
+        Some(Entry { key, ts, hash })
     }
 
     /// The entries no other entry names as a parent, oldest first.
@@ -76,9 +113,17 @@ impl Stream {
     /// stream's user owns that format.
     pub fn heads(
         &self,
-        _place: &dyn Place,
-        _parents: &dyn Fn(&[u8]) -> Vec<Hash>,
+        place: &dyn Place,
+        parents: &dyn Fn(&[u8]) -> Vec<Hash>,
     ) -> Result<Vec<Entry>, PlaceError> {
-        Ok(Vec::new())
+        let entries = self.entries(place)?;
+        let mut superseded = std::collections::HashSet::new();
+        for entry in &entries {
+            superseded.extend(parents(&read_all(place, &entry.key)?));
+        }
+        Ok(entries
+            .into_iter()
+            .filter(|e| !superseded.contains(&e.hash))
+            .collect())
     }
 }

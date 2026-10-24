@@ -4,7 +4,7 @@ use std::fmt;
 use std::io;
 
 use crate::hash::Hash;
-use crate::key::Key;
+use crate::key::{Key, KeyError};
 
 #[derive(Debug)]
 pub enum PlaceError {
@@ -31,6 +31,8 @@ pub enum PlaceError {
     NotWritable,
     /// The place cannot be reached now.
     Offline,
+    /// A key could not be formed (a stream's extension, say).
+    BadKey(KeyError),
     Io(io::Error),
 }
 
@@ -52,6 +54,7 @@ impl fmt::Display for PlaceError {
             ),
             Self::NotWritable => f.write_str("this place takes no writes"),
             Self::Offline => f.write_str("this place cannot be reached now"),
+            Self::BadKey(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "place i/o: {e}"),
         }
     }
@@ -61,6 +64,7 @@ impl std::error::Error for PlaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::BadKey(e) => Some(e),
             _ => None,
         }
     }
@@ -69,5 +73,11 @@ impl std::error::Error for PlaceError {
 impl From<io::Error> for PlaceError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl From<KeyError> for PlaceError {
+    fn from(e: KeyError) -> Self {
+        Self::BadKey(e)
     }
 }
