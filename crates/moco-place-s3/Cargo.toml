@@ -1,0 +1,25 @@
+[package]
+name = "moco-place-s3"
+description = "A moco place in an object store: S3, Cloudflare R2, MinIO, a local directory or memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moco-place = { path = "../moco-place" }
+object_store = { version = "0.14.2", default-features = false, features = ["fs", "aws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+futures = "0.3"
+bytes = "1"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
