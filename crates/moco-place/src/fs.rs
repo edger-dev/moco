@@ -278,7 +278,22 @@ impl Place for FsPlace {
 }
 
 impl crate::inventory::LocalRemove for FsPlace {
-    fn remove(&self, _key: &Key) -> Result<bool, PlaceError> {
-        Ok(false)
+    fn remove(&self, key: &Key) -> Result<bool, PlaceError> {
+        self.reachable()?;
+        let path = self.path(key);
+        match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Ok(false),
+            Err(e) if missing(&e) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                sync_dir(path.parent().unwrap_or(&self.root));
+                Ok(true)
+            }
+            Err(e) if missing(&e) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 }
