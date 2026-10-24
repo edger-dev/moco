@@ -39,6 +39,13 @@ pub enum PlaceError {
     NotAPlace {
         root: std::path::PathBuf,
     },
+    /// A working copy has no remote by this name.
+    UnknownRemote(String),
+    /// A working copy will not do this to this key: why.
+    Refused {
+        key: Key,
+        reason: &'static str,
+    },
     /// A key could not be formed (a stream's extension, say).
     BadKey(KeyError),
     Io(io::Error),
@@ -70,6 +77,8 @@ impl fmt::Display for PlaceError {
                 "no place at {}: it holds no place marker (unmounted, or never made a place)",
                 root.display()
             ),
+            Self::UnknownRemote(name) => write!(f, "no remote named {name:?}"),
+            Self::Refused { key, reason } => write!(f, "refused for {key}: {reason}"),
             Self::BadKey(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "place i/o: {e}"),
         }
