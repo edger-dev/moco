@@ -17,6 +17,7 @@ pub mod hash;
 pub mod key;
 pub mod mem;
 pub mod place;
+pub mod stream;
 
 pub use error::PlaceError;
 pub use fs::FsPlace;
@@ -26,3 +27,4 @@ pub use mem::MemPlace;
 pub use place::{
     ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, put_bytes, read_all,
 };
+pub use stream::{Entry, Stream};
