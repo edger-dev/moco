@@ -13,13 +13,14 @@
 //! implements: 7778729bc8018fe949b0225f90ad2832501a9e82b9d03c973d10bdae568f7c8b@7778729bc8018fe949b0225f90ad2832501a9e82b9d03c973d10bdae568f7c8b
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::PlaceError;
 use crate::hash::Hash;
+use crate::journal::{Journal, lock_dir, write_durably};
 use crate::key::Key;
 use crate::place::{
     Body, ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, read_all,
@@ -28,7 +29,6 @@ use crate::stream::Stream;
 
 const JOURNAL: &str = "journal";
 const PUBLISHED: &str = "published";
-const LOCK: &str = "lock";
 const SNAPSHOT: &str = "snapshot";
 const DELTA: &str = "delta";
 
@@ -70,8 +70,7 @@ impl Published {
 /// The kept state.
 struct Kept {
     records: BTreeMap<Key, Record>,
-    /// Bytes in the journal: always ends at a line's end.
-    len: u64,
+    journal: Journal,
     published: Published,
 }
 
@@ -91,7 +90,11 @@ impl<P: Place> Inventoried<P> {
     pub fn open(place: P, dir: impl Into<PathBuf>) -> Result<Self, PlaceError> {
         let dir = dir.into();
         let lock = lock_dir(&dir)?;
-        let (records, len) = replay(&dir.join(JOURNAL))?;
+        let (journal, lines) = Journal::open(dir.join(JOURNAL))?;
+        let mut records = BTreeMap::new();
+        for line in &lines {
+            apply(&mut records, line);
+        }
         let published = match fs::read_to_string(dir.join(PUBLISHED)) {
             Ok(text) => parse_published(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Published::Snapshot { ts: 0 },
@@ -103,7 +106,7 @@ impl<P: Place> Inventoried<P> {
             clock: Box::new(crate::place::unix_now),
             kept: Mutex::new(Kept {
                 records,
-                len,
+                journal,
                 published,
             }),
             _lock: lock,
@@ -134,25 +137,12 @@ impl<P: Place> Inventoried<P> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Append lines to the journal, then apply them. A failed write is cut
-    /// back off, so the journal always ends at a line's end.
+    /// Append lines to the journal, then apply them.
     fn record(&self, kept: &mut Kept, lines: &[String]) -> Result<(), PlaceError> {
-        let mut journal = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.dir.join(JOURNAL))?;
-        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        let written = journal
-            .write_all(text.as_bytes())
-            .and_then(|()| journal.sync_data());
-        if let Err(e) = written {
-            let _ = journal.set_len(kept.len);
-            return Err(e.into());
-        }
+        kept.journal.append(lines)?;
         for line in lines {
             apply(&mut kept.records, line);
         }
-        kept.len += text.len() as u64;
         Ok(())
     }
 
@@ -162,12 +152,8 @@ impl<P: Place> Inventoried<P> {
     fn rewrite(&self, kept: &mut Kept, records: BTreeMap<Key, Record>) -> Result<(), PlaceError> {
         let ts = kept.published.ts();
         self.save_published(kept, Published::Snapshot { ts })?;
-        let text: String = records
-            .iter()
-            .map(|(key, r)| format!("{}\n", held_line(key, r)))
-            .collect();
-        write_durably(&self.dir, JOURNAL, text.as_bytes())?;
-        kept.len = text.len() as u64;
+        let lines: Vec<String> = records.iter().map(|(key, r)| held_line(key, r)).collect();
+        kept.journal.rewrite(&lines)?;
         kept.records = records;
         Ok(())
     }
@@ -185,7 +171,7 @@ impl<P: Place> Inventoried<P> {
     /// Replace the inventory with what a walk of the place finds now. Changes
     /// recorded while the walk ran are laid over what it found.
     pub fn rebuild(&self) -> Result<Vec<InventoryEntry>, PlaceError> {
-        let from = self.kept().len;
+        let from = self.kept().journal.len();
         let walked = self.place.inventory()?;
         let mut kept = self.kept();
         let mut records: BTreeMap<Key, Record> = walked
@@ -201,7 +187,7 @@ impl<P: Place> Inventoried<P> {
                 )
             })
             .collect();
-        for line in journal_since(&self.dir.join(JOURNAL), from)?.lines() {
+        for line in journal_since(kept.journal.path(), from)?.lines() {
             apply(&mut records, line);
         }
         self.rewrite(&mut kept, records)?;
@@ -243,11 +229,8 @@ impl<P: Place> Inventoried<P> {
             _ => None,
         };
         let content = match delta_from {
-            Some(offset) if offset >= kept.len => return Ok(()),
-            Some(offset) => format!(
-                "{DELTA}\n{}",
-                journal_since(&self.dir.join(JOURNAL), offset)?
-            ),
+            Some(offset) if offset >= kept.journal.len() => return Ok(()),
+            Some(offset) => format!("{DELTA}\n{}", journal_since(kept.journal.path(), offset)?),
             None => {
                 let mut text = format!("{SNAPSHOT}\n");
                 for (key, r) in &kept.records {
@@ -270,7 +253,7 @@ impl<P: Place> Inventoried<P> {
             .saturating_add(1);
         let ts = now.max(after);
         stream.append_at(meeting, ts, content.as_bytes())?;
-        let offset = kept.len;
+        let offset = kept.journal.len();
         self.save_published(
             &mut kept,
             Published::Upto {
@@ -424,49 +407,6 @@ pub fn published(meeting: &dyn Place, name: &str) -> Result<Vec<InventoryEntry>,
     Ok(entries(&records))
 }
 
-/// Take `dir`'s lock, or refuse: one keeper per directory.
-pub(crate) fn lock_dir(dir: &Path) -> Result<File, PlaceError> {
-    fs::create_dir_all(dir)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join(LOCK))?;
-    match lock.try_lock() {
-        Ok(()) => Ok(lock),
-        Err(std::fs::TryLockError::WouldBlock) => Err(PlaceError::Busy(dir.to_path_buf())),
-        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
-    }
-}
-
-/// Replay a journal: the records, and its length up to the last whole line.
-/// A torn tail (a crash mid-write) is cut off, so the next line starts clean.
-fn replay(path: &Path) -> Result<(BTreeMap<Key, Record>, u64), PlaceError> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((BTreeMap::new(), 0)),
-        Err(e) => return Err(e.into()),
-    };
-    let mut records = BTreeMap::new();
-    let mut len = 0u64;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 || !line.ends_with('\n') {
-            break;
-        }
-        apply(&mut records, line.trim_end_matches('\n'));
-        len += n as u64;
-    }
-    let total = fs::metadata(path)?.len();
-    if total > len {
-        OpenOptions::new().write(true).open(path)?.set_len(len)?;
-    }
-    Ok((records, len))
-}
-
 /// The journal's text from byte `offset` on.
 fn journal_since(path: &Path, offset: u64) -> Result<String, PlaceError> {
     let mut file = match File::open(path) {
@@ -478,21 +418,6 @@ fn journal_since(path: &Path, offset: u64) -> Result<String, PlaceError> {
     let mut text = String::new();
     file.read_to_string(&mut text)?;
     Ok(text)
-}
-
-/// Write `name` in `dir` so it survives a power loss: a synced temporary,
-/// renamed over, the directory synced.
-pub(crate) fn write_durably(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), PlaceError> {
-    let temp = dir.join(format!("{name}.tmp"));
-    let mut file = File::create(&temp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&temp, dir.join(name))?;
-    if let Ok(d) = File::open(dir) {
-        let _ = d.sync_all();
-    }
-    Ok(())
 }
 
 fn inventory_stream(name: &str) -> Result<Stream, PlaceError> {

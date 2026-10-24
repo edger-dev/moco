@@ -16,6 +16,7 @@ pub mod error;
 pub mod fs;
 pub mod hash;
 pub mod inventory;
+mod journal;
 pub mod key;
 pub mod mem;
 pub mod place;
@@ -32,4 +33,4 @@ pub use place::{
     Body, ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, put_bytes, read_all,
 };
 pub use stream::{Entry, Stream};
-pub use working::{PushReport, WorkingCopy};
+pub use working::{PullReport, PushReport, WorkingCopy};
