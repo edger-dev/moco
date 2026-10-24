@@ -1,9 +1,9 @@
 //! The trait every place implements.
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 
 use crate::error::PlaceError;
-use crate::hash::Hash;
+use crate::hash::{Hash, Hasher};
 use crate::key::Key;
 
 /// What a place can do — the only ways places differ.
@@ -38,6 +38,15 @@ pub enum Put {
 pub enum Child {
     Object { key: Key, size: u64 },
     Prefix(Key),
+}
+
+impl Child {
+    /// The key of the object or prefix.
+    pub fn key(&self) -> &Key {
+        match self {
+            Self::Object { key, .. } | Self::Prefix(key) => key,
+        }
+    }
 }
 
 /// The outcome of checking one object against the hash its key names.
@@ -91,23 +100,143 @@ pub trait Place: Send + Sync {
     /// Check an object against the hash its key names. The default reads it
     /// back and hashes it; a place that can do this where the bytes are
     /// overrides it.
-    fn verify(&self, _key: &Key) -> Result<Verified, PlaceError> {
-        Ok(Verified::Unnamed)
+    fn verify(&self, key: &Key) -> Result<Verified, PlaceError> {
+        let Some(named) = key.named_hash() else {
+            return Ok(Verified::Unnamed);
+        };
+        let mut body = match self.get(key, None) {
+            Ok(body) => body,
+            Err(PlaceError::NotFound(_)) => return Ok(Verified::Missing),
+            Err(e) => return Err(e),
+        };
+        let (got, _) = Hash::of_reader(&mut body)?;
+        Ok(if got == named {
+            Verified::Intact
+        } else {
+            Verified::Corrupt { got }
+        })
     }
 
-    /// Every object the place holds that its key names a hash for. The
-    /// default walks the place and hashes everything.
+    /// Every object the place holds that its key names a hash for, with the
+    /// hash its bytes have now (a corrupt object shows a hash its key does
+    /// not name). The default walks the place and hashes everything.
     fn inventory(&self) -> Result<Vec<InventoryEntry>, PlaceError> {
-        Ok(Vec::new())
+        let mut entries = Vec::new();
+        let mut prefixes = vec![None];
+        while let Some(prefix) = prefixes.pop() {
+            for child in self.list(prefix.as_ref())? {
+                match child {
+                    Child::Prefix(key) => prefixes.push(Some(key)),
+                    Child::Object { key, .. } if key.named_hash().is_some() => {
+                        let (hash, size) = Hash::of_reader(&mut self.get(&key, None)?)?;
+                        entries.push(InventoryEntry {
+                            key,
+                            hash,
+                            size,
+                            verified_at: unix_now(),
+                        });
+                    }
+                    Child::Object { .. } => {}
+                }
+            }
+        }
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(entries)
     }
 }
 
 /// Put bytes already in memory: hash and size computed here.
-pub fn put_bytes(_place: &dyn Place, _key: &Key, _bytes: &[u8]) -> Result<Put, PlaceError> {
-    Err(PlaceError::NotWritable)
+pub fn put_bytes(place: &dyn Place, key: &Key, bytes: &[u8]) -> Result<Put, PlaceError> {
+    place.put_once(
+        key,
+        &Hash::of_content(bytes),
+        bytes.len() as u64,
+        &mut &bytes[..],
+    )
 }
 
 /// An object's whole content.
-pub fn read_all(_place: &dyn Place, key: &Key) -> Result<Vec<u8>, PlaceError> {
-    Err(PlaceError::NotFound(key.clone()))
+pub fn read_all(place: &dyn Place, key: &Key) -> Result<Vec<u8>, PlaceError> {
+    let mut out = Vec::new();
+    place.get(key, None)?.read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// Seconds since the Unix epoch, now.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Refuse a put whose key does not name the hash it declares.
+pub(crate) fn key_names(key: &Key, hash: &Hash) -> Result<(), PlaceError> {
+    if key.named_hash().as_ref() == Some(hash) {
+        Ok(())
+    } else {
+        Err(PlaceError::KeyNamesOtherHash {
+            key: key.clone(),
+            declared: hash.clone(),
+        })
+    }
+}
+
+/// Copy a put's body to `out`, hashing as it goes, and check it is the
+/// declared size and hash. The caller discards `out` on an error.
+pub(crate) fn copy_checked(
+    key: &Key,
+    hash: &Hash,
+    size: u64,
+    body: &mut dyn Read,
+    out: &mut dyn Write,
+) -> Result<(), PlaceError> {
+    let mut hasher = Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match body.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
+        hasher.update(&buf[..n]);
+        // Past the declared size already: no need to read the rest.
+        if hasher.len() > size {
+            return Err(PlaceError::SizeMismatch {
+                key: key.clone(),
+                declared: size,
+                got: hasher.len(),
+            });
+        }
+        out.write_all(&buf[..n])?;
+    }
+    if hasher.len() != size {
+        return Err(PlaceError::SizeMismatch {
+            key: key.clone(),
+            declared: size,
+            got: hasher.len(),
+        });
+    }
+    let got = hasher.finalize();
+    if &got != hash {
+        return Err(PlaceError::ContentMismatch {
+            key: key.clone(),
+            declared: hash.clone(),
+            got,
+        });
+    }
+    Ok(())
+}
+
+/// The part of `len` bytes a range covers, clamped to them.
+pub(crate) fn span(range: Option<ByteRange>, len: u64) -> (u64, u64) {
+    match range {
+        None => (0, len),
+        Some(r) => {
+            let start = r.start.min(len);
+            let end = r.end.map_or(len, |e| e.min(len)).max(start);
+            (start, end)
+        }
+    }
 }

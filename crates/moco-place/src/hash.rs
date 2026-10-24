@@ -35,13 +35,23 @@ impl fmt::Display for HashParseError {
 impl std::error::Error for HashParseError {}
 
 impl Hash {
-    pub fn of_content(_content: &[u8]) -> Self {
-        Self(String::new())
+    pub fn of_content(content: &[u8]) -> Self {
+        Self(blake3::hash(content).to_hex().to_string())
     }
 
     /// The hash of everything `reader` yields, and how many bytes that was.
-    pub fn of_reader(_reader: &mut dyn Read) -> io::Result<(Self, u64)> {
-        Ok((Self(String::new()), 0))
+    pub fn of_reader(reader: &mut dyn Read) -> io::Result<(Self, u64)> {
+        let mut hasher = Hasher::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((hasher.finalize(), hasher.len()))
     }
 
     pub fn as_hex(&self) -> &str {
@@ -49,12 +59,12 @@ impl Hash {
     }
 
     pub fn shorthash(&self) -> &str {
-        &self.0
+        &self.0[..SHORTHASH_LEN]
     }
 
     /// The first two digits: the directory a sharded layout files it under.
     pub fn shard(&self) -> &str {
-        &self.0
+        &self.0[..2]
     }
 }
 
@@ -62,6 +72,15 @@ impl FromStr for Hash {
     type Err = HashParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != HASH_HEX_LEN {
+            return Err(HashParseError::WrongLength { got: s.len() });
+        }
+        if !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(HashParseError::NotLowerHex);
+        }
         Ok(Self(s.to_owned()))
     }
 }
@@ -84,7 +103,10 @@ impl Hasher {
         Self::default()
     }
 
-    pub fn update(&mut self, _bytes: &[u8]) {}
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.inner.update(bytes);
+        self.len += bytes.len() as u64;
+    }
 
     /// Bytes hashed so far.
     pub fn len(&self) -> u64 {
@@ -96,7 +118,6 @@ impl Hasher {
     }
 
     pub fn finalize(&self) -> Hash {
-        let _ = &self.inner;
-        Hash(String::new())
+        Hash(self.inner.finalize().to_hex().to_string())
     }
 }

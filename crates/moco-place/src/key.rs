@@ -30,7 +30,31 @@ impl std::error::Error for KeyError {}
 
 impl Key {
     pub fn new(key: impl Into<String>) -> Result<Self, KeyError> {
-        Ok(Self(key.into()))
+        let key = key.into();
+        let refuse = |reason| {
+            Err(KeyError {
+                key: key.clone(),
+                reason,
+            })
+        };
+        if key.is_empty() {
+            return refuse("empty");
+        }
+        for segment in key.split('/') {
+            if segment.is_empty() {
+                return refuse("a segment is empty (leading, trailing or doubled '/')");
+            }
+            if segment.starts_with('.') {
+                return refuse("a segment starts with '.': dot-names are the place's own");
+            }
+            if !segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            {
+                return refuse("a segment holds a character other than [A-Za-z0-9._-]");
+            }
+        }
+        Ok(Self(key))
     }
 
     /// This key with one more segment.
@@ -44,17 +68,22 @@ impl Key {
 
     /// The last segment.
     pub fn name(&self) -> &str {
-        &self.0
+        self.0.rsplit('/').next().unwrap_or(&self.0)
     }
 
     /// Everything before the last segment; `None` at the top level.
     pub fn parent(&self) -> Option<Self> {
-        None
+        self.0
+            .rsplit_once('/')
+            .map(|(parent, _)| Self(parent.to_owned()))
     }
 
-    /// The content hash the last segment names, if it names one.
+    /// The content hash the last segment names, if it names one: the part of
+    /// its stem (before the first '.') after the last '-'.
     pub fn named_hash(&self) -> Option<Hash> {
-        None
+        let stem = self.name().split('.').next().unwrap_or_default();
+        let digits = stem.rsplit('-').next().unwrap_or(stem);
+        digits.parse().ok()
     }
 }
 
