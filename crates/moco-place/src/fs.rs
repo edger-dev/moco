@@ -144,3 +144,9 @@ impl Place for FsPlace {
         Ok(children)
     }
 }
+
+impl crate::inventory::LocalRemove for FsPlace {
+    fn remove(&self, _key: &Key) -> Result<bool, PlaceError> {
+        Ok(false)
+    }
+}

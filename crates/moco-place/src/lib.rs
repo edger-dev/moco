@@ -14,6 +14,7 @@
 pub mod error;
 pub mod fs;
 pub mod hash;
+pub mod inventory;
 pub mod key;
 pub mod mem;
 pub mod place;
@@ -22,6 +23,7 @@ pub mod stream;
 pub use error::PlaceError;
 pub use fs::FsPlace;
 pub use hash::{Hash, HashParseError, Hasher, SHORTHASH_LEN};
+pub use inventory::{Inventoried, LocalRemove, published};
 pub use key::{Key, KeyError};
 pub use mem::MemPlace;
 pub use place::{

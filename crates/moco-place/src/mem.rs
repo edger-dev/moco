@@ -152,3 +152,9 @@ impl Read for ArcReader {
         Ok(n)
     }
 }
+
+impl crate::inventory::LocalRemove for MemPlace {
+    fn remove(&self, _key: &Key) -> Result<bool, PlaceError> {
+        Ok(false)
+    }
+}
