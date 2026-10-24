@@ -21,7 +21,7 @@ moco_place::place_contract!(directory, {
     (dir, ObjectPlace::from_url(&url).unwrap())
 });
 
-/// Every put larger than 1 KiB goes up in parts of 4 KiB.
+// Every put larger than 1 KiB goes up in parts of 4 KiB.
 moco_place::place_contract!(
     in_parts,
     (
