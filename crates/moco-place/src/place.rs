@@ -66,10 +66,20 @@ pub enum Verified {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryEntry {
     pub key: Key,
+    /// What its bytes hashed to when last read — for a corrupt object, not
+    /// the hash its key names.
     pub hash: Hash,
     pub size: u64,
-    /// Unix seconds when its bytes were last hashed and found intact.
+    /// Unix seconds when its bytes were last hashed.
     pub verified_at: u64,
+}
+
+impl InventoryEntry {
+    /// Its bytes hashed to what its key names: the place holds the object,
+    /// not a corrupt copy of it.
+    pub fn is_intact(&self) -> bool {
+        self.key.named_hash().as_ref() == Some(&self.hash)
+    }
 }
 
 /// A place holding write-once, content-addressed objects.
@@ -101,6 +111,9 @@ pub trait Place: Send + Sync {
     /// back and hashes it; a place that can do this where the bytes are
     /// overrides it.
     fn verify(&self, key: &Key) -> Result<Verified, PlaceError> {
+        if self.capabilities().cold {
+            return Err(PlaceError::Cold);
+        }
         let Some(named) = key.named_hash() else {
             return Ok(Verified::Unnamed);
         };
@@ -121,6 +134,9 @@ pub trait Place: Send + Sync {
     /// hash its bytes have now (a corrupt object shows a hash its key does
     /// not name). The default walks the place and hashes everything.
     fn inventory(&self) -> Result<Vec<InventoryEntry>, PlaceError> {
+        if self.capabilities().cold {
+            return Err(PlaceError::Cold);
+        }
         let mut entries = Vec::new();
         let mut prefixes = vec![None];
         while let Some(prefix) = prefixes.pop() {
@@ -128,7 +144,13 @@ pub trait Place: Send + Sync {
                 match child {
                     Child::Prefix(key) => prefixes.push(Some(key)),
                     Child::Object { key, .. } if key.named_hash().is_some() => {
-                        let (hash, size) = Hash::of_reader(&mut self.get(&key, None)?)?;
+                        // Gone between the listing and the read: not held.
+                        let mut body = match self.get(&key, None) {
+                            Ok(body) => body,
+                            Err(PlaceError::NotFound(_)) => continue,
+                            Err(e) => return Err(e),
+                        };
+                        let (hash, size) = Hash::of_reader(&mut body)?;
                         entries.push(InventoryEntry {
                             key,
                             hash,
@@ -144,6 +166,46 @@ pub trait Place: Send + Sync {
         Ok(entries)
     }
 }
+
+macro_rules! forward_place {
+    ($($ty:ty),*) => {$(
+        impl<T: Place + ?Sized> Place for $ty {
+            fn capabilities(&self) -> Capabilities {
+                (**self).capabilities()
+            }
+            fn put_once(
+                &self,
+                key: &Key,
+                hash: &Hash,
+                size: u64,
+                body: &mut dyn Read,
+            ) -> Result<Put, PlaceError> {
+                (**self).put_once(key, hash, size, body)
+            }
+            fn get(
+                &self,
+                key: &Key,
+                range: Option<ByteRange>,
+            ) -> Result<Box<dyn Read + Send>, PlaceError> {
+                (**self).get(key, range)
+            }
+            fn exists(&self, key: &Key) -> Result<bool, PlaceError> {
+                (**self).exists(key)
+            }
+            fn list(&self, prefix: Option<&Key>) -> Result<Vec<Child>, PlaceError> {
+                (**self).list(prefix)
+            }
+            fn verify(&self, key: &Key) -> Result<Verified, PlaceError> {
+                (**self).verify(key)
+            }
+            fn inventory(&self) -> Result<Vec<InventoryEntry>, PlaceError> {
+                (**self).inventory()
+            }
+        }
+    )*};
+}
+
+forward_place!(&T, Box<T>, std::sync::Arc<T>);
 
 /// Put bytes already in memory: hash and size computed here.
 pub fn put_bytes(place: &dyn Place, key: &Key, bytes: &[u8]) -> Result<Put, PlaceError> {

@@ -78,11 +78,25 @@ impl Key {
             .map(|(parent, _)| Self(parent.to_owned()))
     }
 
-    /// The content hash the last segment names, if it names one: the part of
-    /// its stem (before the first '.') after the last '-'.
+    /// The content hash the last segment names, if it names one. The name
+    /// is `[<prefix>-]<hash>[.<ext>]`, the extension one run of letters and
+    /// digits: so `v1.2-<hash>` names its hash, and a tool's leftover
+    /// `<hash>.jsonl.tmp` does not.
     pub fn named_hash(&self) -> Option<Hash> {
-        let stem = self.name().split('.').next().unwrap_or_default();
-        let digits = stem.rsplit('-').next().unwrap_or(stem);
+        let name = self.name();
+        let stem = match name.rsplit_once('.') {
+            Some((stem, ext))
+                if !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric()) =>
+            {
+                stem
+            }
+            _ => name,
+        };
+        let split = stem.len().checked_sub(64)?;
+        let (before, digits) = (stem.get(..split)?, stem.get(split..)?);
+        if !(before.is_empty() || before.ends_with('-')) {
+            return None;
+        }
         digits.parse().ok()
     }
 }

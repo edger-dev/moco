@@ -28,7 +28,7 @@ fn clock() -> (Arc<AtomicU64>, impl Fn() -> u64 + Send + Sync + 'static) {
 
 fn kept(dir: &std::path::Path) -> (Arc<AtomicU64>, Inventoried<FsPlace>) {
     let (t, c) = clock();
-    let place = Inventoried::open(FsPlace::new(dir.join("place")), dir.join("inv"))
+    let place = Inventoried::open(FsPlace::create(dir.join("place")).unwrap(), dir.join("inv"))
         .unwrap()
         .with_clock(c);
     (t, place)
@@ -115,7 +115,7 @@ fn the_inventory_survives_reopening() {
 fn a_rebuild_records_what_a_walk_finds() {
     let dir = tempfile::tempdir().unwrap();
     // Objects put straight into the place, behind the inventory's back.
-    let raw = FsPlace::new(dir.path().join("place"));
+    let raw = FsPlace::create(dir.path().join("place")).unwrap();
     put_bytes(&raw, &key_for(b"found"), b"found").unwrap();
     let (_t, place) = kept(dir.path());
     assert_eq!(place.inventory().unwrap(), vec![]);

@@ -156,7 +156,7 @@ fn only_entry_names_are_entries() {
 #[test]
 fn a_stream_lives_on_disk_too() {
     let dir = tempfile::tempdir().unwrap();
-    let place = FsPlace::new(dir.path());
+    let place = FsPlace::create(dir.path()).unwrap();
     let s = stream();
     let a = s.append_at(&place, 1, &entry(&[], "a")).unwrap();
     let b = s.append_at(&place, 2, &entry(&[&a.hash], "b")).unwrap();

@@ -102,7 +102,13 @@ fn a_key_names_its_content_hash() {
             "{named}"
         );
     }
-    for unnamed in ["store/af", "notes.md", "1700-abc"] {
+    assert_eq!(
+        Key::new(format!("v1.2-{EMPTY}")).unwrap().named_hash(),
+        Some(h.clone()),
+        "a dot in the prefix"
+    );
+    let leftover = format!("staged/af/{EMPTY}.jsonl.tmp");
+    for unnamed in ["store/af", "notes.md", "1700-abc", leftover.as_str()] {
         assert_eq!(Key::new(unnamed).unwrap().named_hash(), None, "{unnamed}");
     }
 }

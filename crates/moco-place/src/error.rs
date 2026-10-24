@@ -31,6 +31,14 @@ pub enum PlaceError {
     NotWritable,
     /// The place cannot be reached now.
     Offline,
+    /// A read here costs money or hours; such a place verifies itself or
+    /// not at all.
+    Cold,
+    /// No place at this directory: it holds no place marker (an unmounted
+    /// disk's mount point, or a directory never made a place).
+    NotAPlace {
+        root: std::path::PathBuf,
+    },
     /// A key could not be formed (a stream's extension, say).
     BadKey(KeyError),
     Io(io::Error),
@@ -54,6 +62,14 @@ impl fmt::Display for PlaceError {
             ),
             Self::NotWritable => f.write_str("this place takes no writes"),
             Self::Offline => f.write_str("this place cannot be reached now"),
+            Self::Cold => f.write_str(
+                "a read here costs money or hours: this place verifies itself or not at all",
+            ),
+            Self::NotAPlace { root } => write!(
+                f,
+                "no place at {}: it holds no place marker (unmounted, or never made a place)",
+                root.display()
+            ),
             Self::BadKey(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "place i/o: {e}"),
         }
