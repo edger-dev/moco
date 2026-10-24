@@ -19,6 +19,7 @@ pub mod key;
 pub mod mem;
 pub mod place;
 pub mod stream;
+pub mod working;
 
 pub use error::PlaceError;
 pub use fs::FsPlace;
@@ -30,3 +31,4 @@ pub use place::{
     Body, ByteRange, Capabilities, Child, InventoryEntry, Place, Put, Verified, put_bytes, read_all,
 };
 pub use stream::{Entry, Stream};
+pub use working::{PushReport, WorkingCopy};
