@@ -28,6 +28,9 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// records) and never listed. Symlinked directories and files are followed.
 pub struct FsPlace {
     root: PathBuf,
+    /// Online while the marker is there; `false` for a place `within` a
+    /// directory the caller vouches for, online while the directory is.
+    marked: bool,
 }
 
 impl FsPlace {
@@ -39,14 +42,24 @@ impl FsPlace {
         if !marker.is_file() {
             fs::write(&marker, b"moco place\n")?;
         }
-        Ok(Self { root })
+        Ok(Self { root, marked: true })
+    }
+
+    /// A place in a directory the caller knows is no mount point — one
+    /// inside a repository, say — needing no marker: online while the
+    /// directory exists, and nothing written to it until something is put.
+    pub fn within(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            marked: false,
+        }
     }
 
     /// Open the place at `root`, which must already be one.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, PlaceError> {
         let root = root.into();
         if root.join(MARKER).is_file() {
-            Ok(Self { root })
+            Ok(Self { root, marked: true })
         } else {
             Err(PlaceError::NotAPlace { root })
         }
@@ -61,7 +74,11 @@ impl FsPlace {
     }
 
     fn online(&self) -> bool {
-        self.root.join(MARKER).is_file()
+        if self.marked {
+            self.root.join(MARKER).is_file()
+        } else {
+            self.root.is_dir()
+        }
     }
 
     fn reachable(&self) -> Result<(), PlaceError> {

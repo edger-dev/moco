@@ -204,3 +204,23 @@ fn a_place_behind_a_pointer_is_a_place() {
     put_bytes(&&*boxed, &key, b"p").unwrap();
     assert!(shared.exists(&key).unwrap() && boxed.exists(&key).unwrap());
 }
+
+/// A place within a repository's directory needs no marker: nothing is
+/// written until a put, and it is offline once the directory is gone.
+#[test]
+fn a_place_within_a_known_directory_needs_no_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let place = FsPlace::within(dir.path());
+    assert!(place.capabilities().online);
+    assert_eq!(place.list(None).unwrap(), vec![]);
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        0,
+        "a read writes nothing"
+    );
+    put_bytes(&place, &key_for(b"in repo", ""), b"in repo").unwrap();
+    assert!(!dir.path().join(".moco-place").exists());
+    let gone = FsPlace::within(dir.path().join("missing"));
+    assert!(!gone.capabilities().online);
+    assert!(matches!(gone.list(None), Err(PlaceError::Offline)));
+}
