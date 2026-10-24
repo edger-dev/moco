@@ -11,6 +11,7 @@
 //! implements: a7089331ac0dff49deb5acc9afce92b2a9d8a9d5022f66af915f3a2332d6f447@a7089331ac0dff49deb5acc9afce92b2a9d8a9d5022f66af915f3a2332d6f447
 //! task: 8eb001aab192eaab652562506e51b47cbb032b1e69a491c9406ea333a40d5cb3@7840a6fb3279e6c7054b626944f8e202e79231afde7f4d3344d7410cc7e87f18
 
+pub mod contract;
 pub mod error;
 pub mod fs;
 pub mod hash;

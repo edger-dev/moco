@@ -49,6 +49,11 @@ pub enum PlaceError {
         key: Key,
         reason: &'static str,
     },
+    /// The place turned this machine away: credentials or permissions — a
+    /// misconfiguration, not an outage worth waiting out.
+    Denied(String),
+    /// The place's backend failed in a way none of the above names.
+    Backend(String),
     /// A key could not be formed (a stream's extension, say).
     BadKey(KeyError),
     Io(io::Error),
@@ -87,6 +92,8 @@ impl fmt::Display for PlaceError {
             ),
             Self::UnknownRemote(name) => write!(f, "no remote named {name:?}"),
             Self::Refused { key, reason } => write!(f, "refused for {key}: {reason}"),
+            Self::Denied(why) => write!(f, "the place refused this machine: {why}"),
+            Self::Backend(why) => write!(f, "the place failed: {why}"),
             Self::BadKey(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "place i/o: {e}"),
         }

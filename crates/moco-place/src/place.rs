@@ -271,8 +271,9 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Refuse a put whose key does not name the hash it declares.
-pub(crate) fn key_names(key: &Key, hash: &Hash) -> Result<(), PlaceError> {
+/// Refuse a put whose key does not name the hash it declares. Every place
+/// starts its `put_once` with this.
+pub fn key_names(key: &Key, hash: &Hash) -> Result<(), PlaceError> {
     if key.named_hash().as_ref() == Some(hash) {
         Ok(())
     } else {
@@ -285,7 +286,7 @@ pub(crate) fn key_names(key: &Key, hash: &Hash) -> Result<(), PlaceError> {
 
 /// Copy a put's body to `out`, hashing as it goes, and check it is the
 /// declared size and hash. The caller discards `out` on an error.
-pub(crate) fn copy_checked(
+pub fn copy_checked(
     key: &Key,
     hash: &Hash,
     size: u64,
@@ -330,8 +331,9 @@ pub(crate) fn copy_checked(
     Ok(())
 }
 
-/// The part of `len` bytes a range covers, clamped to them.
-pub(crate) fn span(range: Option<ByteRange>, len: u64) -> (u64, u64) {
+/// The part of `len` bytes a range covers, clamped to them: past the end,
+/// or backwards, is empty. Every place reads ranges so.
+pub fn span(range: Option<ByteRange>, len: u64) -> (u64, u64) {
     match range {
         None => (0, len),
         Some(r) => {
