@@ -7,11 +7,16 @@
 //!
 //! The `Place` trait is sync; this place runs its requests on a runtime of
 //! its own, so it is safe to call from plain code and from inside another
-//! runtime alike. A put declares its hash, so the bytes are checked as they
+//! runtime alike — but a call blocks its thread until the answer comes, so
+//! async code calls it through `spawn_blocking`, as it would file I/O. A put declares its hash, so the bytes are checked as they
 //! are sent: nothing that does not match is ever uploaded whole (a large
 //! upload is aborted). Small puts are a conditional create (`If-None-Match:
-//! *`); a large one goes up in parts after a check that it is absent — two
-//! writers racing on one key upload the same bytes, so the race is harmless.
+//! *`); a large one goes up in parts after a check that it is absent. The
+//! one exception to the contract: two writers racing a *large* put of one
+//! key may both hear `Stored` (object_store offers no conditional create for
+//! uploads in parts) — they uploaded the same bytes, so nothing is lost.
+//! A transfer has a connect budget and an idle budget, never a cap on its
+//! whole length.
 //!
 //! implements: a7089331ac0dff49deb5acc9afce92b2a9d8a9d5022f66af915f3a2332d6f447@a7089331ac0dff49deb5acc9afce92b2a9d8a9d5022f66af915f3a2332d6f447
 //! implements: 95cf2a2fda557b922e0e3ff0ddaf48c25d7e598de9358cb53985b8f1aa7b3aa0@95cf2a2fda557b922e0e3ff0ddaf48c25d7e598de9358cb53985b8f1aa7b3aa0
@@ -22,8 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::channel::{mpsc, oneshot};
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use moco_place::place::{copy_checked, key_names, span};
 use moco_place::{Body, ByteRange, Capabilities, Child, Hash, Hasher, Key, Place, PlaceError, Put};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
@@ -35,6 +39,11 @@ use object_store::{
     PutPayload, RetryConfig,
 };
 use tokio::runtime::Runtime;
+
+/// S3's smallest part, bar the last.
+const S3_MIN_PART: usize = 5 * 1024 * 1024;
+/// S3's most parts in one upload.
+const MAX_PARTS: u64 = 10_000;
 
 /// Puts larger than this go up in parts.
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 16 * 1024 * 1024;
@@ -48,6 +57,8 @@ pub struct ObjectPlace {
     cold: bool,
     multipart_threshold: u64,
     part_size: usize,
+    /// The store's smallest part (S3's 5 MiB; none for the others).
+    min_part: usize,
     /// Its own runtime; shut down in the background on drop, which is
     /// allowed even inside another runtime.
     runtime: Option<Runtime>,
@@ -66,6 +77,7 @@ impl ObjectPlace {
             cold: false,
             multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
             part_size: DEFAULT_PART_SIZE,
+            min_part: 1,
             runtime: Some(runtime),
         })
     }
@@ -116,10 +128,14 @@ impl ObjectPlace {
                 // not after minutes of retries.
                 let mut s3 = s3
                     .with_bucket_name(bucket)
+                    // A connect budget and an idle budget, but no cap on a
+                    // whole transfer: a GB of media over a slow link is
+                    // slow, not offline.
                     .with_client_options(
                         ClientOptions::new()
                             .with_connect_timeout(Duration::from_secs(3))
-                            .with_timeout(Duration::from_secs(30)),
+                            .with_timeout_disabled()
+                            .with_read_timeout(Duration::from_secs(30)),
                     )
                     .with_retry(RetryConfig {
                         max_retries: 1,
@@ -141,18 +157,43 @@ impl ObjectPlace {
                 {
                     s3 = s3.with_allow_http(true);
                 }
+                // Without keys, object_store would try a cloud metadata
+                // service and time out: a misconfiguration, said at once.
+                if s3
+                    .get_config_value(&AmazonS3ConfigKey::AccessKeyId)
+                    .is_none()
+                {
+                    return Err(PlaceError::Denied(format!(
+                        "place url {url:?}: no credentials (set AWS_ACCESS_KEY_ID and \
+                         AWS_SECRET_ACCESS_KEY, or pass aws_access_key_id)"
+                    )));
+                }
                 let store = s3.build().map_err(|e| bad(e.to_string()))?;
-                Self::new(Arc::new(store), &path)
+                let mut place = Self::new(Arc::new(store), &prefix_of(&path)?)?;
+                place.min_part = S3_MIN_PART;
+                Ok(place)
             }
             "file" => {
                 let dir = parsed
                     .to_file_path()
                     .map_err(|()| bad("not a local path".into()))?;
+                std::fs::create_dir_all(&dir)?;
                 let store =
                     LocalFileSystem::new_with_prefix(&dir).map_err(|e| bad(e.to_string()))?;
                 Self::new(Arc::new(store), "")
             }
-            "memory" => Self::new(Arc::new(InMemory::new()), &path),
+            // `memory://name/sub` and `memory:///name/sub` both prefix
+            // `name/sub`.
+            "memory" => {
+                let host = parsed.host_str().unwrap_or_default();
+                let joined = [host, path.as_str()]
+                    .iter()
+                    .filter(|p| !p.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("/");
+                Self::new(Arc::new(InMemory::new()), &prefix_of(&joined)?)
+            }
             other => Err(bad(format!("unknown scheme {other:?}"))),
         }
     }
@@ -227,7 +268,12 @@ impl ObjectPlace {
             .run(async move { store.put_multipart(&path).await })?
             .map_err(|e| backend(e, key))?;
         let mut hasher = Hasher::new();
-        let mut part = vec![0u8; self.part_size];
+        // Big enough for the store, and few enough parts for the whole size.
+        let part_size = self
+            .part_size
+            .max(self.min_part)
+            .max(usize::try_from(size.div_ceil(MAX_PARTS)).unwrap_or(usize::MAX));
+        let mut part = vec![0u8; part_size];
         let outcome: Result<(), PlaceError> = loop {
             let filled = match fill(body, &mut part) {
                 Ok(n) => n,
@@ -244,7 +290,9 @@ impl ObjectPlace {
                     got: hasher.len(),
                 });
             }
-            let sent = upload.put_part(PutPayload::from(Bytes::copy_from_slice(&part[..filled])));
+            let chunk =
+                Bytes::from(std::mem::replace(&mut part, vec![0u8; part_size])).slice(..filled);
+            let sent = upload.put_part(PutPayload::from(chunk));
             match self.run(sent) {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => break Err(backend(e, key)),
@@ -271,7 +319,13 @@ impl ObjectPlace {
         });
         match outcome {
             Ok(()) => {
-                let done = self.run(async move { upload.complete().await })?;
+                let done = self.run(async move {
+                    let done = upload.complete().await;
+                    if done.is_err() {
+                        let _ = upload.abort().await;
+                    }
+                    done
+                })?;
                 done.map(|_| Put::Stored).map_err(|e| backend(e, key))
             }
             Err(e) => {
@@ -290,6 +344,16 @@ impl Drop for ObjectPlace {
     }
 }
 
+/// A URL's path as a store prefix, percent-decoded once.
+fn prefix_of(path: &str) -> Result<String, PlaceError> {
+    if path.is_empty() {
+        return Ok(String::new());
+    }
+    StorePath::from_url_path(path)
+        .map(|p| p.to_string())
+        .map_err(|e| PlaceError::Backend(format!("place prefix {path:?}: {e}")))
+}
+
 /// Read until `buf` is full or the body ends; how much was read.
 fn fill(body: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
@@ -304,7 +368,8 @@ fn fill(body: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
     Ok(filled)
 }
 
-/// What an object-store failure on `key` means for a place.
+/// What an object-store failure reading `key` means for a place: nothing
+/// there is `NotFound`.
 fn backend(e: object_store::Error, key: &Key) -> PlaceError {
     match e {
         object_store::Error::NotFound { .. } => PlaceError::NotFound(key.clone()),
@@ -317,60 +382,91 @@ fn backend(e: object_store::Error, key: &Key) -> PlaceError {
     }
 }
 
-/// What an object-store failure means for a place, absent a key.
+/// What an object-store failure means for a place, absent a key: refused
+/// (credentials, permissions), unreachable (connecting, timing out), or the
+/// backend's own.
 fn classify(e: object_store::Error) -> PlaceError {
     match e {
         object_store::Error::PermissionDenied { .. }
         | object_store::Error::Unauthenticated { .. } => PlaceError::Denied(e.to_string()),
         other => {
-            // A refusal or an unreachable host come back generic, with the
-            // status or the transport's words in the text.
-            let text = format!("{other:?} {other}");
+            if unreachable(&other) {
+                return PlaceError::Offline;
+            }
+            // A refused request comes back generic, its status in the text.
+            let text = other.to_string();
             if ["403 Forbidden", "401 Unauthorized"]
                 .iter()
                 .any(|s| text.contains(s))
             {
-                PlaceError::Denied(other.to_string())
-            } else if [
-                "error sending request",
-                "Connection refused",
-                "connection refused",
-                "timed out",
-                "dns error",
-                "Connect",
-            ]
-            .iter()
-            .any(|s| text.contains(s))
-            {
-                PlaceError::Offline
+                PlaceError::Denied(text)
             } else {
-                PlaceError::Backend(other.to_string())
+                PlaceError::Backend(text)
             }
         }
     }
 }
 
-/// One message from a get's task: its length first, then its bytes.
+/// Whether the transport never reached the place: an HTTP error of kind
+/// connect or timeout somewhere in the chain.
+fn unreachable(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = current {
+        if let Some(http) = err.downcast_ref::<object_store::client::HttpError>() {
+            use object_store::client::HttpErrorKind;
+            if matches!(
+                http.kind(),
+                HttpErrorKind::Connect | HttpErrorKind::Timeout | HttpErrorKind::Interrupted
+            ) {
+                return true;
+            }
+        }
+        current = err.source();
+    }
+    false
+}
+
+/// A chunk of a get's bytes, or why the stream broke.
 type Chunk = Result<Bytes, io::Error>;
 
-/// A get's bytes as they arrive from the place's runtime.
+/// Chunks in flight between a get's task and its reader.
+const CHUNKS_IN_FLIGHT: usize = 4;
+
+/// A get's bytes as they arrive from the place's runtime. Plain channels,
+/// so reading blocks the reading thread and nothing else — inside any
+/// runtime or executor. A stream that ends before `left` bytes came is an
+/// error, never a clean short read.
 struct Streamed {
-    chunks: mpsc::Receiver<Chunk>,
+    chunks: std::sync::mpsc::Receiver<Chunk>,
+    room: Arc<tokio::sync::Semaphore>,
     current: Bytes,
+    left: u64,
 }
 
 impl Read for Streamed {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while self.current.is_empty() {
-            match futures::executor::block_on(self.chunks.next()) {
-                Some(Ok(bytes)) => self.current = bytes,
-                Some(Err(e)) => return Err(e),
-                None => return Ok(0),
+            if self.left == 0 {
+                return Ok(0);
+            }
+            match self.chunks.recv() {
+                Ok(Ok(bytes)) => {
+                    self.room.add_permits(1);
+                    self.current = bytes;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("the place's stream ended {} bytes short", self.left),
+                    ));
+                }
             }
         }
         let n = self.current.len().min(buf.len());
         buf[..n].copy_from_slice(&self.current[..n]);
         self.current = self.current.slice(n..);
+        self.left = self.left.saturating_sub(n as u64);
         Ok(n)
     }
 }
@@ -396,7 +492,7 @@ impl Place for ObjectPlace {
             return self.put_in_parts(key, hash, size, body);
         }
         // Checked as it is read, so a mismatch is never sent.
-        let mut bytes = Vec::with_capacity(size as usize);
+        let mut bytes = Vec::with_capacity(size.min(DEFAULT_MULTIPART_THRESHOLD) as usize);
         copy_checked(key, hash, size, body, &mut bytes)?;
         let store = self.store.clone();
         let path = self.path(key);
@@ -436,8 +532,10 @@ impl Place for ObjectPlace {
                 Some(GetRange::Bounded(start..end))
             }
         };
-        let (len_tx, len_rx) = oneshot::channel::<Result<u64, object_store::Error>>();
-        let (mut chunk_tx, chunk_rx) = mpsc::channel::<Chunk>(4);
+        let (len_tx, len_rx) = std::sync::mpsc::sync_channel::<Result<u64, object_store::Error>>(1);
+        let (chunk_tx, chunk_rx) = std::sync::mpsc::channel::<Chunk>();
+        let room = Arc::new(tokio::sync::Semaphore::new(CHUNKS_IN_FLIGHT));
+        let task_room = room.clone();
         let store = self.store.clone();
         let runtime = self
             .runtime
@@ -461,20 +559,29 @@ impl Place for ObjectPlace {
             }
             let mut stream = result.into_stream();
             while let Some(chunk) = stream.next().await {
+                // Wait for room: a slow reader holds the stream back rather
+                // than buffering the object.
+                let Ok(permit) = task_room.acquire().await else {
+                    return;
+                };
+                permit.forget();
                 let chunk = chunk.map_err(io::Error::other);
                 let failed = chunk.is_err();
-                if chunk_tx.send(chunk).await.is_err() || failed {
+                if chunk_tx.send(chunk).is_err() || failed {
                     return;
                 }
             }
         });
-        let len = futures::executor::block_on(len_rx)
+        let len = len_rx
+            .recv()
             .map_err(|_| PlaceError::Backend("a get ended without an answer".into()))?
             .map_err(|e| backend(e, key))?;
         Ok(Body::new(
             Streamed {
                 chunks: chunk_rx,
+                room,
                 current: Bytes::new(),
+                left: len,
             },
             len,
         ))

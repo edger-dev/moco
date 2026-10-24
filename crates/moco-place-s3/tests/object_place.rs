@@ -142,3 +142,116 @@ fn a_real_endpoint_round_trip() {
     assert!(listed.iter().any(|c| c.key() == &key));
     let _ = Key::new("store").unwrap();
 }
+
+moco_place::place_contract!(directory_in_parts, {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}/objects", dir.path().display());
+    (
+        dir,
+        ObjectPlace::from_url(&url)
+            .unwrap()
+            .with_multipart(1024, 4096),
+    )
+});
+
+/// A body outliving its place ends in an error, never a clean short read.
+#[test]
+fn a_body_outliving_its_place_does_not_end_short() {
+    let place = ObjectPlace::from_url("memory://")
+        .unwrap()
+        .with_multipart(1024, 4096);
+    let bytes: Vec<u8> = (0..2_000_000u32).map(|i| (i % 249) as u8).collect();
+    let key = key_for(&bytes, "");
+    put_bytes(&place, &key, &bytes).unwrap();
+    let mut body = place.get(&key, None).unwrap();
+    let len = body.len();
+    drop(place);
+    let mut out = Vec::new();
+    match std::io::Read::read_to_end(&mut body, &mut out) {
+        Ok(_) => assert_eq!(out.len() as u64, len, "a clean end is a whole body"),
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof, "{e}"),
+    }
+}
+
+/// A range of an object that went up in parts reads back exactly.
+#[test]
+fn a_range_of_an_object_in_parts() {
+    let place = ObjectPlace::from_url("memory://")
+        .unwrap()
+        .with_multipart(1024, 4096);
+    let bytes: Vec<u8> = (0..50_000u32).map(|i| (i % 241) as u8).collect();
+    let key = key_for(&bytes, "");
+    put_bytes(&place, &key, &bytes).unwrap();
+    let mut out = Vec::new();
+    let mut body = place
+        .get(
+            &key,
+            Some(moco_place::ByteRange {
+                start: 10_000,
+                end: Some(30_000),
+            }),
+        )
+        .unwrap();
+    assert_eq!(body.len(), 20_000);
+    std::io::Read::read_to_end(&mut body, &mut out).unwrap();
+    assert_eq!(out, bytes[10_000..30_000]);
+}
+
+/// A prefix of several segments scopes listing and reads.
+#[test]
+fn a_nested_prefix_scopes_the_place() {
+    let store: std::sync::Arc<dyn object_store::ObjectStore> =
+        std::sync::Arc::new(object_store::memory::InMemory::new());
+    let place = ObjectPlace::new(store.clone(), "team/alice").unwrap();
+    let key = key_for(b"nested", ".md");
+    put_bytes(&place, &key, b"nested").unwrap();
+    assert_eq!(
+        place.list(None).unwrap(),
+        vec![moco_place::Child::Prefix(Key::new("store").unwrap())]
+    );
+    let shard = key.parent().unwrap();
+    assert_eq!(place.list(Some(&shard)).unwrap().len(), 1);
+    let other = ObjectPlace::new(store, "team").unwrap();
+    assert_eq!(
+        other.list(None).unwrap(),
+        vec![moco_place::Child::Prefix(Key::new("alice").unwrap())]
+    );
+}
+
+/// A local directory place that does not exist yet is made.
+#[test]
+fn a_missing_directory_is_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}/new/objects", dir.path().display());
+    let place = ObjectPlace::from_url(&url).unwrap();
+    put_bytes(&place, &key_for(b"made", ""), b"made").unwrap();
+}
+
+/// An S3 place with no credentials is refused at once, not left to time
+/// out against a metadata service.
+#[test]
+fn an_s3_place_without_credentials_is_refused() {
+    let err = ObjectPlace::from_url_with(
+        "s3://bucket/prefix",
+        [("aws_endpoint", "http://127.0.0.1:9")],
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(err, PlaceError::Denied(_)), "{err}");
+}
+
+/// Streaming a large body from blocking code inside a single-threaded
+/// runtime completes.
+#[tokio::test(flavor = "current_thread")]
+async fn a_large_body_streams_from_spawn_blocking() {
+    let total = tokio::task::spawn_blocking(|| {
+        let place = ObjectPlace::from_url("memory://").unwrap();
+        let bytes: Vec<u8> = (0..5_000_000u32).map(|i| (i % 233) as u8).collect();
+        let key = key_for(&bytes, "");
+        put_bytes(&place, &key, &bytes).unwrap();
+        read_all(&place, &key).unwrap().len()
+    })
+    .await
+    .unwrap();
+    assert_eq!(total, 5_000_000);
+}
