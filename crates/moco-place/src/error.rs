@@ -39,6 +39,9 @@ pub enum PlaceError {
     NotAPlace {
         root: std::path::PathBuf,
     },
+    /// Another keeper holds this directory (another process, or another
+    /// handle in this one).
+    Busy(std::path::PathBuf),
     /// A working copy has no remote by this name.
     UnknownRemote(String),
     /// A working copy will not do this to this key: why.
@@ -76,6 +79,11 @@ impl fmt::Display for PlaceError {
                 f,
                 "no place at {}: it holds no place marker (unmounted, or never made a place)",
                 root.display()
+            ),
+            Self::Busy(dir) => write!(
+                f,
+                "{} is kept by another process or handle already",
+                dir.display()
             ),
             Self::UnknownRemote(name) => write!(f, "no remote named {name:?}"),
             Self::Refused { key, reason } => write!(f, "refused for {key}: {reason}"),

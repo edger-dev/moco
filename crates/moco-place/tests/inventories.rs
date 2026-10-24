@@ -102,6 +102,7 @@ fn the_inventory_survives_reopening() {
     want.sort_by(|a, b| a.key.cmp(&b.key));
     assert_eq!(place.inventory().unwrap(), want);
     place.compact().unwrap();
+    drop(place);
     let (_t, place) = kept(dir.path());
     assert_eq!(
         place.inventory().unwrap(),
@@ -185,4 +186,149 @@ fn a_published_inventory_reads_back_from_the_meeting_point() {
         place.inventory().unwrap()
     );
     assert_eq!(published(&meeting, "never").unwrap(), vec![]);
+}
+
+/// A crash mid-line leaves a torn tail; the next record starts on its own
+/// line, survives a reopen, and is published.
+#[test]
+fn a_torn_last_line_does_not_swallow_the_next_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let meeting = MemPlace::new();
+    {
+        let (_t, place) = kept(dir.path());
+        put_bytes(&place, &key_for(b"first"), b"first").unwrap();
+        place.publish(&meeting, "disk", false).unwrap();
+    }
+    use std::io::Write;
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("inv/journal"))
+        .unwrap();
+    journal.write_all(b"store/ab/torn-fragm").unwrap();
+    drop(journal);
+
+    {
+        let (_t, place) = kept(dir.path());
+        put_bytes(&place, &key_for(b"second"), b"second").unwrap();
+        place.publish(&meeting, "disk", false).unwrap();
+        assert_eq!(
+            published(&meeting, "disk").unwrap(),
+            place.inventory().unwrap()
+        );
+    }
+    let (_t, place) = kept(dir.path());
+    assert_eq!(place.inventory().unwrap().len(), 2);
+    put_bytes(&place, &key_for(b"third"), b"third").unwrap();
+    place.publish(&meeting, "disk", false).unwrap();
+    assert_eq!(
+        published(&meeting, "disk").unwrap(),
+        place.inventory().unwrap()
+    );
+}
+
+/// After a compaction the next publish is a snapshot, and it sorts after
+/// every earlier entry even within one millisecond.
+#[test]
+fn a_publish_after_compaction_is_a_snapshot_that_sorts_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let meeting = MemPlace::new();
+    let (_t, place) = kept(dir.path());
+    put_bytes(&place, &key_for(b"a"), b"a").unwrap();
+    place.publish(&meeting, "disk", false).unwrap();
+    put_bytes(&place, &key_for(b"b"), b"b").unwrap();
+    place.publish(&meeting, "disk", false).unwrap();
+    place.remove(&key_for(b"a")).unwrap();
+    place.compact().unwrap();
+    place.publish(&meeting, "disk", false).unwrap();
+    let stream = Stream::new(Key::new("inventories/disk").unwrap());
+    let entries = stream.entries(&meeting).unwrap();
+    let last = moco_place::read_all(&meeting, &entries.last().unwrap().key).unwrap();
+    assert!(
+        last.starts_with(b"snapshot"),
+        "{}",
+        String::from_utf8_lossy(&last)
+    );
+    assert_eq!(
+        published(&meeting, "disk").unwrap(),
+        place.inventory().unwrap()
+    );
+}
+
+/// Publishing under another name, or to another meeting point, starts with a
+/// snapshot there: a delta never lands where its base is missing.
+#[test]
+fn a_new_name_or_meeting_point_gets_a_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (MemPlace::new(), MemPlace::new());
+    let (_t, place) = kept(dir.path());
+    put_bytes(&place, &key_for(b"a"), b"a").unwrap();
+    place.publish(&first, "disk", false).unwrap();
+    put_bytes(&place, &key_for(b"b"), b"b").unwrap();
+    place.publish(&second, "disk", false).unwrap();
+    assert_eq!(
+        published(&second, "disk").unwrap(),
+        place.inventory().unwrap()
+    );
+    place.publish(&first, "other-name", false).unwrap();
+    assert_eq!(
+        published(&first, "other-name").unwrap(),
+        place.inventory().unwrap()
+    );
+}
+
+/// Deltas with no snapshot under them are not an inventory.
+#[test]
+fn deltas_without_a_snapshot_are_refused() {
+    let meeting = MemPlace::new();
+    let stream = Stream::new(Key::new("inventories/orphan").unwrap());
+    stream
+        .append_at(&meeting, 1, b"delta\nstore/ab/x -\n")
+        .unwrap();
+    assert!(published(&meeting, "orphan").is_err());
+}
+
+/// One inventory, one keeper: a second opener is turned away.
+#[test]
+fn a_second_keeper_of_one_inventory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_t, first) = kept(dir.path());
+    let second = Inventoried::open(
+        FsPlace::create(dir.path().join("place")).unwrap(),
+        dir.path().join("inv"),
+    );
+    assert!(second.is_err());
+    drop(first);
+    assert!(
+        Inventoried::open(
+            FsPlace::create(dir.path().join("place")).unwrap(),
+            dir.path().join("inv"),
+        )
+        .is_ok()
+    );
+}
+
+/// A put of an object already there but never recorded is recorded as never
+/// verified.
+#[test]
+fn an_unrecorded_present_object_is_recorded_unverified() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = FsPlace::create(dir.path().join("place")).unwrap();
+    put_bytes(&raw, &key_for(b"old"), b"old").unwrap();
+    let (_t, place) = kept(dir.path());
+    put_bytes(&place, &key_for(b"old"), b"old").unwrap();
+    assert_eq!(place.inventory().unwrap(), vec![entry(b"old", 0)]);
+}
+
+/// A verify-only change is published as a delta.
+#[test]
+fn a_verify_is_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let meeting = MemPlace::new();
+    let (t, place) = kept(dir.path());
+    put_bytes(&place, &key_for(b"v"), b"v").unwrap();
+    place.publish(&meeting, "disk", false).unwrap();
+    t.store(5_000, Ordering::Relaxed);
+    place.verify(&key_for(b"v")).unwrap();
+    place.publish(&meeting, "disk", false).unwrap();
+    assert_eq!(published(&meeting, "disk").unwrap()[0].verified_at, 5_000);
 }

@@ -51,17 +51,27 @@ impl Stream {
         &self.prefix
     }
 
-    /// Append `bytes` as an entry stamped now.
+    /// Append `bytes` as an entry stamped now — or just after the latest
+    /// entry, if the clock says otherwise (two appends in one millisecond, a
+    /// clock stepped back), so the latest entry is always the last appended
+    /// here. This lists the stream once.
     pub fn append(&self, place: &dyn Place, bytes: &[u8]) -> Result<Entry, PlaceError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        self.append_at(place, now, bytes)
+        let after = self.latest(place)?.map_or(0, |e| e.ts + 1);
+        self.append_at(place, now.max(after), bytes)
     }
 
     /// Append `bytes` as an entry stamped `ts` (unix milliseconds).
     pub fn append_at(&self, place: &dyn Place, ts: u64, bytes: &[u8]) -> Result<Entry, PlaceError> {
+        if ts >= 10u64.pow(TS_DIGITS as u32) {
+            return Err(PlaceError::Refused {
+                key: self.prefix.clone(),
+                reason: "an entry's timestamp is unix milliseconds, at most 15 digits",
+            });
+        }
         let hash = Hash::of_content(bytes);
         let name = match &self.ext {
             Some(ext) => format!("{ts:0TS_DIGITS$}-{hash}.{ext}"),
@@ -108,7 +118,8 @@ impl Stream {
         Some(Entry { key, ts, hash })
     }
 
-    /// The entries no other entry names as a parent, oldest first.
+    /// The entries no other entry names as a parent, oldest first; the same
+    /// content appended twice is one head (its latest entry).
     /// `parents` reads the parent hashes out of an entry's content — the
     /// stream's user owns that format.
     pub fn heads(
@@ -121,9 +132,14 @@ impl Stream {
         for entry in &entries {
             superseded.extend(parents(&read_all(place, &entry.key)?));
         }
-        Ok(entries
+        let mut heads: Vec<Entry> = Vec::new();
+        for entry in entries
             .into_iter()
             .filter(|e| !superseded.contains(&e.hash))
-            .collect())
+        {
+            heads.retain(|h| h.hash != entry.hash);
+            heads.push(entry);
+        }
+        Ok(heads)
     }
 }

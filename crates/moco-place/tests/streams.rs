@@ -164,3 +164,39 @@ fn a_stream_lives_on_disk_too() {
     assert_eq!(s.entries(&place).unwrap(), vec![a, b.clone()]);
     assert_eq!(s.heads(&place, &parents_of).unwrap(), vec![b]);
 }
+
+/// Appends in one millisecond still come out in order: a writer stamps each
+/// entry after the latest.
+#[test]
+fn quick_appends_keep_their_order() {
+    let place = MemPlace::new();
+    let s = stream();
+    let mut last = None;
+    for i in 0..20u8 {
+        last = Some(s.append(&place, &[i]).unwrap());
+    }
+    assert_eq!(s.latest(&place).unwrap(), last);
+    let ts: Vec<u64> = s.entries(&place).unwrap().iter().map(|e| e.ts).collect();
+    assert!(ts.windows(2).all(|w| w[0] < w[1]), "{ts:?}");
+}
+
+/// A timestamp too wide for an entry's name is refused, not hidden.
+#[test]
+fn an_over_wide_timestamp_is_refused() {
+    let place = MemPlace::new();
+    assert!(
+        stream()
+            .append_at(&place, 1_000_000_000_000_000, b"us")
+            .is_err()
+    );
+}
+
+/// The same bytes appended twice are one head, not two.
+#[test]
+fn the_same_bytes_twice_are_one_head() {
+    let place = MemPlace::new();
+    let s = stream();
+    s.append_at(&place, 1, &entry(&[], "x")).unwrap();
+    s.append_at(&place, 2, &entry(&[], "x")).unwrap();
+    assert_eq!(s.heads(&place, &parents_of).unwrap().len(), 1);
+}

@@ -299,3 +299,20 @@ fn eviction_is_local_and_careful() {
         "reads through again"
     );
 }
+
+/// One queue, one keeper: a second working copy on it is turned away.
+#[test]
+fn a_second_working_copy_on_one_queue_is_refused() {
+    let (cloud, nas) = (Switch::new(), Switch::new());
+    let dir = tempfile::tempdir().unwrap();
+    let first = open(dir.path(), &cloud, &nas);
+    assert!(
+        WorkingCopy::open(
+            FsPlace::create(dir.path().join("local")).unwrap(),
+            dir.path().join("queue")
+        )
+        .is_err()
+    );
+    drop(first);
+    let _again = open(dir.path(), &cloud, &nas);
+}

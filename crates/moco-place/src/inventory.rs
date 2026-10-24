@@ -8,11 +8,13 @@
 //! the place (a disk in a drawer) still knows what it holds. A walk can
 //! always rebuild it.
 //!
+//! One keeper per inventory: the directory is locked while open.
+//!
 //! implements: 7778729bc8018fe949b0225f90ad2832501a9e82b9d03c973d10bdae568f7c8b@7778729bc8018fe949b0225f90ad2832501a9e82b9d03c973d10bdae568f7c8b
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -26,6 +28,7 @@ use crate::stream::Stream;
 
 const JOURNAL: &str = "journal";
 const PUBLISHED: &str = "published";
+const LOCK: &str = "lock";
 const SNAPSHOT: &str = "snapshot";
 const DELTA: &str = "delta";
 
@@ -44,22 +47,32 @@ struct Record {
     verified_at: u64,
 }
 
-/// The kept state: the records, and how far the journal had got at the
-/// last publish.
-struct Kept {
-    records: BTreeMap<Key, Record>,
-    lines: u64,
-    published: Published,
+/// What the last publish covered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Published {
+    /// The next publish is a snapshot: never published, or the journal was
+    /// rewritten since. `ts` is the last entry's stamp, so the snapshot
+    /// sorts after it.
+    Snapshot { ts: u64 },
+    /// The journal's first `offset` bytes went to stream `name`, its last
+    /// entry stamped `ts`.
+    Upto { name: String, offset: u64, ts: u64 },
 }
 
-/// What the last publish covered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Published {
-    /// Never published, or the journal was rewritten since: the next
-    /// publish is a snapshot.
-    Snapshot,
-    /// The journal's first `lines` lines, the last entry stamped `ts`.
-    Upto { lines: u64, ts: u64 },
+impl Published {
+    fn ts(&self) -> u64 {
+        match self {
+            Self::Snapshot { ts } | Self::Upto { ts, .. } => *ts,
+        }
+    }
+}
+
+/// The kept state.
+struct Kept {
+    records: BTreeMap<Key, Record>,
+    /// Bytes in the journal: always ends at a line's end.
+    len: u64,
+    published: Published,
 }
 
 /// A place with its inventory kept beside it.
@@ -68,29 +81,20 @@ pub struct Inventoried<P> {
     dir: PathBuf,
     clock: Box<dyn Fn() -> u64 + Send + Sync>,
     kept: Mutex<Kept>,
+    /// Held for as long as this keeper lives.
+    _lock: File,
 }
 
 impl<P: Place> Inventoried<P> {
     /// Keep `place`'s inventory in `dir` (created if missing), picking up the
-    /// journal already there.
+    /// journal already there. Refused while another keeper holds `dir`.
     pub fn open(place: P, dir: impl Into<PathBuf>) -> Result<Self, PlaceError> {
         let dir = dir.into();
-        fs::create_dir_all(&dir)?;
-        let mut records = BTreeMap::new();
-        let mut lines = 0;
-        match fs::read_to_string(dir.join(JOURNAL)) {
-            Ok(text) => {
-                for line in text.lines() {
-                    lines += 1;
-                    apply(&mut records, line);
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
+        let lock = lock_dir(&dir)?;
+        let (records, len) = replay(&dir.join(JOURNAL))?;
         let published = match fs::read_to_string(dir.join(PUBLISHED)) {
             Ok(text) => parse_published(&text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Published::Snapshot,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Published::Snapshot { ts: 0 },
             Err(e) => return Err(e.into()),
         };
         Ok(Self {
@@ -99,9 +103,10 @@ impl<P: Place> Inventoried<P> {
             clock: Box::new(crate::place::unix_now),
             kept: Mutex::new(Kept {
                 records,
-                lines,
+                len,
                 published,
             }),
+            _lock: lock,
         })
     }
 
@@ -122,91 +127,99 @@ impl<P: Place> Inventoried<P> {
     }
 
     fn kept(&self) -> MutexGuard<'_, Kept> {
-        // Every change is applied to the journal before the map, so a panic
+        // Every change reaches the journal before the map, so a panic
         // mid-change leaves the map no newer than the journal.
         self.kept
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Append lines to the journal and apply them.
+    /// Append lines to the journal, then apply them. A failed write is cut
+    /// back off, so the journal always ends at a line's end.
     fn record(&self, kept: &mut Kept, lines: &[String]) -> Result<(), PlaceError> {
         let mut journal = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.dir.join(JOURNAL))?;
-        let mut text = String::new();
-        for line in lines {
-            text.push_str(line);
-            text.push('\n');
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let written = journal
+            .write_all(text.as_bytes())
+            .and_then(|()| journal.sync_data());
+        if let Err(e) = written {
+            let _ = journal.set_len(kept.len);
+            return Err(e.into());
         }
-        journal.write_all(text.as_bytes())?;
-        journal.sync_data()?;
         for line in lines {
             apply(&mut kept.records, line);
-            kept.lines += 1;
         }
+        kept.len += text.len() as u64;
         Ok(())
     }
 
-    /// Replace the journal with one line per record.
-    fn rewrite(&self, kept: &mut Kept) -> Result<(), PlaceError> {
-        let text: String = kept
-            .records
+    /// Replace the journal with one line per record of `records`, and adopt
+    /// them. The publish state is reset first: a crash after the rename
+    /// must not leave it pointing into the old journal.
+    fn rewrite(&self, kept: &mut Kept, records: BTreeMap<Key, Record>) -> Result<(), PlaceError> {
+        let ts = kept.published.ts();
+        self.save_published(kept, Published::Snapshot { ts })?;
+        let text: String = records
             .iter()
             .map(|(key, r)| format!("{}\n", held_line(key, r)))
             .collect();
-        let temp = self.dir.join(format!("{JOURNAL}.tmp"));
-        fs::write(&temp, text)?;
-        fs::rename(&temp, self.dir.join(JOURNAL))?;
-        kept.lines = kept.records.len() as u64;
-        // Offsets into the old journal mean nothing now.
-        self.save_published(kept, Published::Snapshot)
+        write_durably(&self.dir, JOURNAL, text.as_bytes())?;
+        kept.len = text.len() as u64;
+        kept.records = records;
+        Ok(())
     }
 
     fn save_published(&self, kept: &mut Kept, published: Published) -> Result<(), PlaceError> {
-        let text = match published {
-            Published::Snapshot => "snapshot\n".to_owned(),
-            Published::Upto { lines, ts } => format!("upto {lines} {ts}\n"),
+        let text = match &published {
+            Published::Snapshot { ts } => format!("snapshot {ts}\n"),
+            Published::Upto { name, offset, ts } => format!("upto {name} {offset} {ts}\n"),
         };
-        let temp = self.dir.join(format!("{PUBLISHED}.tmp"));
-        fs::write(&temp, text)?;
-        fs::rename(&temp, self.dir.join(PUBLISHED))?;
+        write_durably(&self.dir, PUBLISHED, text.as_bytes())?;
         kept.published = published;
         Ok(())
     }
 
-    /// Replace the inventory with what a walk of the place finds now.
+    /// Replace the inventory with what a walk of the place finds now. Changes
+    /// recorded while the walk ran are laid over what it found.
     pub fn rebuild(&self) -> Result<Vec<InventoryEntry>, PlaceError> {
+        let from = self.kept().len;
         let walked = self.place.inventory()?;
         let mut kept = self.kept();
-        kept.records = walked
-            .iter()
+        let mut records: BTreeMap<Key, Record> = walked
+            .into_iter()
             .map(|e| {
                 (
-                    e.key.clone(),
+                    e.key,
                     Record {
-                        hash: e.hash.clone(),
+                        hash: e.hash,
                         size: e.size,
                         verified_at: e.verified_at,
                     },
                 )
             })
             .collect();
-        self.rewrite(&mut kept)?;
-        Ok(walked)
+        for line in journal_since(&self.dir.join(JOURNAL), from)?.lines() {
+            apply(&mut records, line);
+        }
+        self.rewrite(&mut kept, records)?;
+        Ok(entries(&kept.records))
     }
 
     /// Rewrite the journal as one line per object.
     pub fn compact(&self) -> Result<(), PlaceError> {
         let mut kept = self.kept();
-        self.rewrite(&mut kept)
+        let records = kept.records.clone();
+        self.rewrite(&mut kept, records)
     }
 
     /// Publish what changed since the last publish to `meeting`, under
-    /// `inventories/<name>`: a snapshot the first time (or when asked, or
-    /// after the journal was rewritten), a delta after; nothing when nothing
-    /// changed.
+    /// `inventories/<name>`: a delta when the stream there still ends with
+    /// this keeper's last publish to that name; a snapshot otherwise — the
+    /// first time, when asked, after a rewrite, for a new name or meeting
+    /// point. Nothing when nothing changed.
     pub fn publish(
         &self,
         meeting: &dyn Place,
@@ -215,38 +228,57 @@ impl<P: Place> Inventoried<P> {
     ) -> Result<(), PlaceError> {
         let stream = inventory_stream(name)?;
         let mut kept = self.kept();
-        let (content, last_ts) = match (snapshot, kept.published) {
-            (false, Published::Upto { lines, ts }) => {
-                if lines >= kept.lines {
-                    return Ok(());
-                }
-                let journal = fs::read_to_string(self.dir.join(JOURNAL))?;
-                let changed: Vec<&str> = journal.lines().skip(lines as usize).collect();
-                (format!("{DELTA}\n{}\n", changed.join("\n")), ts)
+        let latest = stream.latest(meeting)?;
+        let delta_from = match &kept.published {
+            Published::Upto {
+                name: published_to,
+                offset,
+                ts,
+            } if !snapshot
+                && published_to == name
+                && latest.as_ref().map(|e| e.ts) == Some(*ts) =>
+            {
+                Some(*offset)
             }
-            (_, published) => {
-                let last_ts = match published {
-                    Published::Upto { ts, .. } => ts,
-                    Published::Snapshot => 0,
-                };
-                let lines: Vec<String> = kept
-                    .records
-                    .iter()
-                    .map(|(key, r)| held_line(key, r))
-                    .collect();
-                (format!("{SNAPSHOT}\n{}\n", lines.join("\n")), last_ts)
+            _ => None,
+        };
+        let content = match delta_from {
+            Some(offset) if offset >= kept.len => return Ok(()),
+            Some(offset) => format!(
+                "{DELTA}\n{}",
+                journal_since(&self.dir.join(JOURNAL), offset)?
+            ),
+            None => {
+                let mut text = format!("{SNAPSHOT}\n");
+                for (key, r) in &kept.records {
+                    text.push_str(&held_line(key, r));
+                    text.push('\n');
+                }
+                text
             }
         };
-        // Strictly later than the last entry, so a delta never sorts before
-        // what it follows.
+        // Strictly after both this keeper's last entry and the stream's, so
+        // a delta never sorts before what it follows.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let ts = now.max(last_ts + 1);
+        let after = kept
+            .published
+            .ts()
+            .max(latest.map_or(0, |e| e.ts))
+            .saturating_add(1);
+        let ts = now.max(after);
         stream.append_at(meeting, ts, content.as_bytes())?;
-        let lines = kept.lines;
-        self.save_published(&mut kept, Published::Upto { lines, ts })
+        let offset = kept.len;
+        self.save_published(
+            &mut kept,
+            Published::Upto {
+                name: name.to_owned(),
+                offset,
+                ts,
+            },
+        )
     }
 }
 
@@ -268,8 +300,9 @@ impl<P: Place> Place for Inventoried<P> {
     }
 
     /// A stored put is recorded as verified now: a place that keeps an
-    /// inventory checks bytes as they land. One already present and not yet
-    /// recorded is recorded as never verified.
+    /// inventory is local, and checks bytes as they land. One already
+    /// present and not yet recorded is recorded as never verified
+    /// (`verified_at` 0) under the hash its key names.
     fn put_once(
         &self,
         key: &Key,
@@ -280,10 +313,14 @@ impl<P: Place> Place for Inventoried<P> {
         let put = self.place.put_once(key, hash, size, body)?;
         let mut kept = self.kept();
         let verified_at = match put {
-            Put::Stored => (self.clock)(),
             Put::Present if kept.records.contains_key(key) => return Ok(put),
             Put::Present => 0,
+            Put::Stored => (self.clock)(),
         };
+        // Removed again before this got the lock: nothing to record.
+        if !self.place.exists(key)? {
+            return Ok(put);
+        }
         let record = Record {
             hash: hash.clone(),
             size,
@@ -306,7 +343,8 @@ impl<P: Place> Place for Inventoried<P> {
     }
 
     /// Hash the object where it is and record what was found: restamped when
-    /// intact, its real hash when corrupt, dropped when missing.
+    /// intact, its real hash when corrupt, dropped when missing. (The kept
+    /// place is local, so reading it back is the check.)
     fn verify(&self, key: &Key) -> Result<Verified, PlaceError> {
         if self.place.capabilities().cold {
             return Err(PlaceError::Cold);
@@ -320,6 +358,8 @@ impl<P: Place> Place for Inventoried<P> {
             Err(e) => return Err(e),
         };
         let mut kept = self.kept();
+        // Removed while it was being hashed: it is missing now.
+        let found = found.filter(|_| self.place.exists(key).unwrap_or(false));
         Ok(match found {
             None => {
                 if kept.records.contains_key(key) {
@@ -350,17 +390,30 @@ impl<P: Place> Place for Inventoried<P> {
 }
 
 /// What a place published to a meeting point under `inventories/<name>`: the
-/// latest snapshot with every later delta applied.
+/// latest snapshot with every later delta applied. Deltas with no snapshot
+/// under them are refused, not read as a partial inventory.
 pub fn published(meeting: &dyn Place, name: &str) -> Result<Vec<InventoryEntry>, PlaceError> {
     let stream = inventory_stream(name)?;
+    let all = stream.entries(meeting)?;
+    if all.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut contents = Vec::new();
-    for entry in stream.entries(meeting)?.iter().rev() {
+    let mut based = false;
+    for entry in all.iter().rev() {
         let text = String::from_utf8_lossy(&read_all(meeting, &entry.key)?).into_owned();
         let is_snapshot = text.lines().next() == Some(SNAPSHOT);
         contents.push(text);
         if is_snapshot {
+            based = true;
             break;
         }
+    }
+    if !based {
+        return Err(PlaceError::Refused {
+            key: stream.prefix().clone(),
+            reason: "its deltas have no snapshot under them",
+        });
     }
     let mut records = BTreeMap::new();
     for text in contents.iter().rev() {
@@ -369,6 +422,77 @@ pub fn published(meeting: &dyn Place, name: &str) -> Result<Vec<InventoryEntry>,
         }
     }
     Ok(entries(&records))
+}
+
+/// Take `dir`'s lock, or refuse: one keeper per directory.
+pub(crate) fn lock_dir(dir: &Path) -> Result<File, PlaceError> {
+    fs::create_dir_all(dir)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(LOCK))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err(PlaceError::Busy(dir.to_path_buf())),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// Replay a journal: the records, and its length up to the last whole line.
+/// A torn tail (a crash mid-write) is cut off, so the next line starts clean.
+fn replay(path: &Path) -> Result<(BTreeMap<Key, Record>, u64), PlaceError> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((BTreeMap::new(), 0)),
+        Err(e) => return Err(e.into()),
+    };
+    let mut records = BTreeMap::new();
+    let mut len = 0u64;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 || !line.ends_with('\n') {
+            break;
+        }
+        apply(&mut records, line.trim_end_matches('\n'));
+        len += n as u64;
+    }
+    let total = fs::metadata(path)?.len();
+    if total > len {
+        OpenOptions::new().write(true).open(path)?.set_len(len)?;
+    }
+    Ok((records, len))
+}
+
+/// The journal's text from byte `offset` on.
+fn journal_since(path: &Path, offset: u64) -> Result<String, PlaceError> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e.into()),
+    };
+    file.seek(SeekFrom::Start(offset))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+/// Write `name` in `dir` so it survives a power loss: a synced temporary,
+/// renamed over, the directory synced.
+pub(crate) fn write_durably(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), PlaceError> {
+    let temp = dir.join(format!("{name}.tmp"));
+    let mut file = File::create(&temp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp, dir.join(name))?;
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 fn inventory_stream(name: &str) -> Result<Stream, PlaceError> {
@@ -383,8 +507,7 @@ fn gone_line(key: &Key) -> String {
     format!("{key} -")
 }
 
-/// Apply one journal line; a line that does not parse is skipped (a torn
-/// last line after a crash).
+/// Apply one journal line; one that does not parse is skipped.
 fn apply(records: &mut BTreeMap<Key, Record>, line: &str) {
     let fields: Vec<&str> = line.split_whitespace().collect();
     match fields.as_slice() {
@@ -417,11 +540,18 @@ fn apply(records: &mut BTreeMap<Key, Record>, line: &str) {
 fn parse_published(text: &str) -> Published {
     let fields: Vec<&str> = text.split_whitespace().collect();
     match fields.as_slice() {
-        ["upto", lines, ts] => match (lines.parse(), ts.parse()) {
-            (Ok(lines), Ok(ts)) => Published::Upto { lines, ts },
-            _ => Published::Snapshot,
+        ["upto", name, offset, ts] => match (offset.parse(), ts.parse()) {
+            (Ok(offset), Ok(ts)) => Published::Upto {
+                name: (*name).to_owned(),
+                offset,
+                ts,
+            },
+            _ => Published::Snapshot { ts: 0 },
         },
-        _ => Published::Snapshot,
+        ["snapshot", ts] => Published::Snapshot {
+            ts: ts.parse().unwrap_or(0),
+        },
+        _ => Published::Snapshot { ts: 0 },
     }
 }
 

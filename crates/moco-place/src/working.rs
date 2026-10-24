@@ -50,6 +50,8 @@ pub struct WorkingCopy<L> {
     dir: PathBuf,
     /// Copies still to push: (remote, key).
     queue: Mutex<BTreeSet<(String, Key)>>,
+    /// Held for as long as this working copy lives: one keeper per queue.
+    _lock: fs::File,
 }
 
 impl<L: Place + LocalRemove> WorkingCopy<L> {
@@ -58,7 +60,7 @@ impl<L: Place + LocalRemove> WorkingCopy<L> {
     /// everything is evictable until `route` and `keep` say otherwise.
     pub fn open(local: L, dir: impl Into<PathBuf>) -> Result<Self, PlaceError> {
         let dir = dir.into();
-        fs::create_dir_all(&dir)?;
+        let lock = crate::inventory::lock_dir(&dir)?;
         let mut queue = BTreeSet::new();
         let mut settled = false;
         match fs::read_to_string(dir.join(QUEUE)) {
@@ -93,6 +95,7 @@ impl<L: Place + LocalRemove> WorkingCopy<L> {
             keep: Arc::new(|_| false),
             dir,
             queue: Mutex::new(queue),
+            _lock: lock,
         };
         // Settled copies need not be replayed forever.
         if settled {
@@ -149,10 +152,7 @@ impl<L: Place + LocalRemove> WorkingCopy<L> {
             .iter()
             .map(|(remote, key)| format!("+ {remote} {key}\n"))
             .collect();
-        let temp = self.dir.join(format!("{QUEUE}.tmp"));
-        fs::write(&temp, text)?;
-        fs::rename(&temp, self.dir.join(QUEUE))?;
-        Ok(())
+        crate::inventory::write_durably(&self.dir, QUEUE, text.as_bytes())
     }
 
     fn remote(&self, name: &str) -> Option<&Arc<dyn Place>> {
